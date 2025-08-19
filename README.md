@@ -1,15 +1,22 @@
 # WS2812B LED controller with ESP8266
 
-This project requires the Arduino development framework and libraries for ESP8266, and provides a low level uplink function derived from the Adafriut NeoPixel library.
+This project requires the Arduino development framework and libraries for ESP8266, low level functions derived from the Adafriut NeoPixel library.
 
 ## Useful links
 
 https://arduino-esp8266.readthedocs.io/
 https://docs.arduino.cc/language-reference/
 
+## Hardware
+
+* AZDelivery ESP8266-12F D1-mini
+* Rotary encoder AZDelivery KY-040
+* Status LED with a single SK6812 (RGBW)
+* Level converter boards for output lines
+
 ## The sketch
 
-Arduino programs are called a "sketch" which consists (at the bare minimum) of two functions, __setup__ which initializes the program, and and __loop__ which is repeatedly invoked and performs the actual work.
+Arduino programs are called a "sketch" which consists (at the bare minimum) of two functions, __setup()__ which initializes the program, and __loop()__ which is repeatedly invoked and performs the actual work. There is no fixed loop time; when a repetitive timing is desired, a __sleep()__ needs to be invoked, and the time can be calculated from the millisecond timer.
 
 The sketch provides a set of LED effects with their parameters, it handles the rotary controller input to change parameters, maintains a clock with 1 minute granularity (one tick every 60 seconds), and processes data packets that have been received via WiFI.
 
@@ -23,13 +30,13 @@ All LED data is stored in a single array with __LED_CNT__ lenght, and is written
 
 ### Effects
 
-Following effects can be selected using the rotary wheel:
+Following effects can be selected using the rotary wheel, where the color shown
 
 * Sparkling stars with following parameters:
-** Color wheel center: select a color, or "black" which moves through the wheel in 80 seconds.
-** Speed
-** Density
-** Brightness
+  * Color wheel center: select a color, or "black" which moves through the wheel in 80 seconds.
+  * Speed
+  * Density
+  * Brightness
 * Candle light chain
 * Dual Color Flip
 * Sprites: Moving dots, instantiate in one end, and vanish at the other
