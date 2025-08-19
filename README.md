@@ -14,7 +14,7 @@ https://docs.arduino.cc/language-reference/
 * Status LED with a single SK6812 (RGBW)
 * Level converter boards for output lines
 
-!(https://github.com/klausbotschen/esp8266-led/blob/main/doc/pin-useage-small.png)
+![Pinout of ESP8266 for this project](https://github.com/klausbotschen/esp8266-led/blob/main/doc/pin-useage-small.png)
 
 ## The sketch
 
