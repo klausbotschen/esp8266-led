@@ -14,6 +14,8 @@ https://docs.arduino.cc/language-reference/
 * Status LED with a single SK6812 (RGBW)
 * Level converter boards for output lines
 
+!(https://github.com/klausbotschen/esp8266-led/blob/main/doc/pin-useage-small.png)
+
 ## The sketch
 
 Arduino programs are called a "sketch" which consists (at the bare minimum) of two functions, __setup()__ which initializes the program, and __loop()__ which is repeatedly invoked and performs the actual work. There is no fixed loop time; when a repetitive timing is desired, a __sleep()__ needs to be invoked, and the time can be calculated from the millisecond timer.
