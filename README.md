@@ -4,8 +4,18 @@ This project requires the Arduino development framework and libraries for ESP826
 
 ## Useful links
 
-https://arduino-esp8266.readthedocs.io/
+The C language understood by the Arduino compiler is limited and described here:
+
 https://docs.arduino.cc/language-reference/
+
+Introduction to the ESP8266 specific library functionalities:
+
+https://arduino-esp8266.readthedocs.io/
+
+
+One issue that arises is to map from linear input values to exponential output values, like the brightness in values from 0..15 to 4..254. The calculation can be performed with the following spreadsheet:
+
+https://github.com/klausbotschen/esp8266-led/blob/main/doc/log-curve-fitting.ods
 
 ## Hardware
 
@@ -22,7 +32,7 @@ Arduino programs are called a "sketch" which consists (at the bare minimum) of t
 
 The sketch provides a set of LED effects with their parameters, it handles the rotary controller input to change parameters, maintains a clock with 1 minute granularity (one tick every 60 seconds), and processes data packets that have been received via WiFI.
 
-### Functional Overview
+### LED output control
 
 All LED data is stored in a single array with __LED_CNT__ lenght, and is written to 4 pins a the same time. This array can be split up (with a parameter at creation of the strip):
 

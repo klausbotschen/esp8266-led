@@ -68,12 +68,15 @@ void loadParam(void);
 
 #define NPROG 8
 
+// variables that are set in interrupt handling (rotary encoder)
 volatile uint8_t type=0, col=0, bri=3, del=0, dens=0,
   tim1=0, tim2=0, tim3=0, tim4=0;
 
+// this datastructure is stored in the EEPROM
+// and holds all necessary config entries for all effects.
 struct
 {
-  uint32_t magic, ctrid;
+  uint32_t magic, ctrid; // controller ID
   uint16_t mcnt, zone, len;
   uint8_t type, scol, sacc, ccs, cdel, speed, stype, density;
   uint8_t bri[NPROG];
@@ -81,6 +84,8 @@ struct
 
 #define EE_MAGIC 0xbecdaffe
 
+// --------------------------------------------------------
+// every effect needs to store some data from cycle to cycle.
 typedef struct
 {
   uint16_t hue;         // 0 = full spectrum, 1 = auto color wheel, 2..16 manual color wheel
@@ -117,6 +122,7 @@ typedef struct
   uint16_t dv[SPR_CNT];
 } sprites_t;
 
+// as only one effect is active at a time, we use a memory union
 static union
 {
   sparks_t sparks;
@@ -135,7 +141,7 @@ void paramsel(uint8_t);
 void proginit(uint8_t load);
 void rdclock(void);
 
-// rotary encoder
+// rotary encoder handling
 volatile uint8_t rep=0x0f, red=0, rem, *rec, ref=0; // ref: flag for change
 uint8_t wmc, ren, reb=0, res=0, lev=1;  // res: parameter, ren set to lev/res when ref=1
 uint8_t req=0, de=0; // switch request, display enable
@@ -181,10 +187,14 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+// callback for the webserver getting a request for the root page
 void handleRoot() {
   server.send(200, "text/html", htmlPage);
 }
 
+// process a HTTP request or UDP packet:
+// input is a string with letters followed by a single HEX digit,
+// e.g. p0c0s5dFb4
 void handleCommand(uint8_t *rt, uint16_t len) {
   uint32_t ctrid=0;
   uint16_t i=0, cmd=0, cval=0;
@@ -193,6 +203,7 @@ void handleCommand(uint8_t *rt, uint16_t len) {
     if (!cmd) cmd = *rt++;
     else {
       cval = *rt++;
+      // convert ASCII to HEX digit
       if (cval >= 'a') cval -= 'a'-10;
       else if (cval >= 'A') cval -= 'A'-10;
       else cval -= '0';
@@ -202,6 +213,7 @@ void handleCommand(uint8_t *rt, uint16_t len) {
         case 'c': wmc|=0x04; cmd = 0; col = cval; break;
         case 's': wmc|=0x08; cmd = 0; del = cval; break;
         case 'd': wmc|=0x10; cmd = 0; dens = cval; break;
+        // receive a new 8 HEX digit board ID
         case 'i': wmc|=0x11;
         ctrid <<= 4; ctrid += cval; idc++;
         if (idc >= 8) { conf.ctrid=ctrid; idc=0; cmd=0; *alivePkt=0; }
@@ -211,6 +223,7 @@ void handleCommand(uint8_t *rt, uint16_t len) {
   }
 }
 
+// web browser sending back an AJAX post message with commands
 void handlePost() {
   if (server.hasArg("text")) {
     String rt = server.arg("text");
@@ -221,13 +234,16 @@ void handlePost() {
   }
 }
 
+// got a special UDP packet with a sync command
+// => write LED data
 void handleSync(uint8_t *rt, uint16_t len) {
   if (type != 255) return;
-  alive_tim = now;  // pause alive only when data is received
+  alive_tim = now;  // alive! data has been received
   strip.show();
 }
 
-// first byte defines strip and show flag: 0b000s4321
+// got a UDP packet with LED string data:
+// first byte defines show flag: (s) and strip bit field: 000s4321
 // 0x1F = write pattern to all strips and show it
 // default map 0x8421 
 void handleBinary(uint8_t *rt, uint16_t len) {
@@ -249,11 +265,16 @@ void handleBinary(uint8_t *rt, uint16_t len) {
     map >>= 4;
   }
   if (cmd & 0x10) {
-    alive_tim = now;  // pause alive only when data is received
+    alive_tim = now;  // alive! data has been received
     strip.show();
   }
 }
 
+// called at every loop cycle when WiFi is connected:
+// process received UDP packets and HTTP server requests
+// when UDP LED packets have been received,
+// we check if the data stream is still alive, if not, switch back
+// to the last program, and send out broadcast packets with our ID.
 void handleIP() {
   int packetSize = Udp.parsePacket();
   if (packetSize) {
@@ -291,6 +312,8 @@ void handleIP() {
 }
 
 // ######################################################################
+
+// called once at startup
 
 void setup() {
   // system_set_os_print(0);
@@ -439,6 +462,13 @@ void proginit(uint8_t load)
   }
 }
 
+// main loop
+// - check timer
+// - updated values from the rotary encoder,
+// - build user interface menu
+// - call effects program
+// - handle UI and time steps
+
 void loop() {
   now = millis();
   // clock update
@@ -512,6 +542,7 @@ void loop() {
       case 3: de = (conf.mcnt < 420 || conf.mcnt > 1200) ? 1 : 0; break; // 20-7
     }
     if (de) {
+      // finally we actually run our effect programs:
       switch (type) {
         case 0: Stars(); break;
         case 1: Candles(); break;
@@ -526,6 +557,7 @@ void loop() {
       strip.show();
     }
   }
+  // user interface: blink status LED when has been changed and is written to EEPROM
   uint32_t sc = stateCol;
   if (altstCol && ((now & 0x03ff) < 850)) sc = altstCol;
   if (conf_dirty) {
@@ -542,7 +574,7 @@ void loop() {
   }
   state.setPixelColor(0, sc);
   state.show();
-  // no delay when udp to pixel
+  // no delay when udp to pixel, otherwise we wait
   if (type != 255) {
     base += STEP;
     d = base - now;
@@ -553,6 +585,7 @@ void loop() {
 // ######################################################################
 // Box-Muller-transformation for gaussian distributed random numbers
 // timing wise: add, mul 0.06µs, div 1.2µs, sqrt 8.2µs, pow 56µs, sin 16µs
+// used by Stars effect
 
 #define MAX_VAR 0x7fffff80
 
@@ -599,6 +632,8 @@ IRAM_ATTR void re_read () {
 }
 
 // ######################################################################
+// sparkling stars all along the LED strip
+
 #define SINULL 192
 
 uint8_t col_dis = 0;  // flag to display color
@@ -731,6 +766,7 @@ uint8_t Stars_Param() {
 }
 
 // ######################################################################
+// flickering candles
 
 #define SPXDELAY 92
 #define BASE 112
@@ -804,6 +840,7 @@ uint8_t Candle_Param() {
 }
 
 // ######################################################################
+// toggle between colors
 
 // curve fitting 1 ... 16 => 10 ... 1500 with y = a e^bx
 // log y = log a + bx log e
@@ -908,6 +945,8 @@ uint8_t Duco_Param() {
 }
 
 // ######################################################################
+// sprites running along the LED strip with different speed, overtaking each other
+
 // sprites have color, position and speed (col, pos 0..65535, v)
 // yet unused: delta v (dv)
 // configuration: density, speed, brightness
@@ -1010,6 +1049,7 @@ uint8_t Sprites_Param() {
 }
 
 // ######################################################################
+// was only written to distinguish between RGB and RBG chips
 
 void Test_Init(void)
 {
