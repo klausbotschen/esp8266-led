@@ -18,15 +18,19 @@
 #include "Adafruit_NeoPixel.h"
 #include "entropy.h"
 
-#define LED_CNT 800
+#define LED_CNT 300
+// WS2812B consume 24 bit per LED = 3 bytes
 #define LED_BYTES 3
-#define LED_PIXT NEO_RGB
+// 10 LED/m farytail string: RGB
+// 60 LED/m strip: GRB
+#define LED_PIXT NEO_GRB
 #define LED_UDP (LED_CNT*LED_BYTES/4)
 
 #define SPARKS (LED_CNT*64/100)
 #define CANDLES (LED_CNT/25)
 #define MAX_COL 4
 #define SPR_CNT (LED_CNT/3)
+// time in ms for each iteration => ca 30 fps
 #define STEP 33
 
 //const char* ssid = "A1-7DB236D1";
@@ -40,10 +44,13 @@ const char* password = "buskatze";
 
 // D8 = GPIO15
 Adafruit_NeoPixel state = Adafruit_NeoPixel (1, D8, NEO_GRBW);
-// _D3_ = GPIO0 oszillates after boot for ~50ms and has an effect after receiving a UDP packet.
-// strings - old: GRB, new: RGB, NEO_SPLIT2 - NEO_NOSPLIT
+// NEO_NOSPLIT: the full length is written to all 4 pins, which means the strips have identical data.
+// NEO_SPLIT2: the first half of the array is written to pins 1 and 3, the seconed half is reversed in order
+//      and written to pins 2 and 4. This results in having the full array on the strings with the controller in the middle.
+// NEO_SPLIT4: the array is cut into 4 segments, and each segment is written to one pin.
 // D3 => 16, D2 => 4, D1 => 5, D7 => 13
-Adafruit_NeoPixel strip = Adafruit_NeoPixel (LED_CNT, D3, D2, D1, D7, LED_PIXT+NEO_SPLIT4);
+Adafruit_NeoPixel strip = Adafruit_NeoPixel (LED_CNT, D3, D2, D1, D7, LED_PIXT+NEO_NOSPLIT);
+// note, _D3_ = GPIO0 oszillates after boot for ~50ms and has a similar effect after receiving a UDP packet. Whatever.
 
 void Stars_Init(void);
 void Stars_Load(void);
