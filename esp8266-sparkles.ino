@@ -87,22 +87,21 @@ void loadParam(void);
 #define NPROG 8
 
 // variables that are set in interrupt handling (rotary encoder)
-volatile uint8_t type=0, col=0, bri=3, del=0, dens=0,
-  tim1=0, tim2=0, tim3=0, tim4=0;
+volatile uint8_t type=0, col=0, bri=3, del=0, dens=0;
 
 // this datastructure is stored in the EEPROM
 // and holds all necessary config entries for all effects.
 struct
 {
   uint32_t magic, ctrid; // controller ID
-  uint16_t mcnt, zone, len;
+  uint16_t len;
   uint8_t type, scol, sacc, ccs, cdel, speed, stype, density;
   uint8_t sparks, cooling, flicker;
   uint8_t lavacool, heat, lavaspeed;
   uint8_t bri[NPROG];
 } conf;
 
-#define EE_MAGIC 0xbecdaffe
+#define EE_MAGIC 0x3ecdaffe
 
 // --------------------------------------------------------
 // every effect needs to store some data from cycle to cycle.
@@ -169,7 +168,7 @@ static union
 
 // ######################################################################
 
-uint16_t base, now, mts, conf_tim, alive_tim, d;
+uint16_t base, now, conf_tim, alive_tim, d;
 uint8_t conf_dirty, inacnt;
 uint32_t stateCol, altstCol=0;
 
@@ -179,7 +178,7 @@ void rdclock(void);
 
 // rotary encoder handling
 volatile uint8_t rep=0x0f, red=0, rem, *rec, ref=0; // ref: flag for change
-uint8_t wmc, ren, reb=0, res=0, lev=1;  // res: parameter, ren set to lev/res when ref=1
+uint8_t wmc, ren, reb=0, res=0;  // res: parameter, ren set to res when ref=1
 uint8_t req=0, de=0; // switch request, display enable
 uint16_t reqts; // switch pressed
 void re_read(void);
@@ -279,7 +278,7 @@ void handleSync(uint8_t *rt, uint16_t len) {
 }
 
 // got a UDP packet with LED string data:
-// first byte defines show flag: (s) and strip bit field: 000s4321
+// first byte defines show flag (s) and strip bit field: 000s4321
 // 0x1F = write pattern to all strips and show it
 // default map 0x8421 
 void handleBinary(uint8_t *rt, uint16_t len) {
@@ -291,7 +290,7 @@ void handleBinary(uint8_t *rt, uint16_t len) {
   if (type != 255) {
     type = 255;
     strip.clear();
-    strip.setBrightness(255); // disable
+    strip.setBrightness(255); // server does all brightness scaling
     strip.updateType(LED_PIXT+NEO_SPLIT4);
   }
   if (len > LED_UDP) len = LED_UDP;
@@ -389,60 +388,38 @@ void setup() {
   state.setBrightness(8);
 
   conf_dirty = 0;
+  // read configuration from EEPROM
   EEPROM.begin (sizeof(conf));
   EEPROM.get (0, conf);
+  // when integrity fails, initialize with reasonable defaults
   if (conf.magic != EE_MAGIC || conf.len != sizeof(conf))
   {
     conf.magic = EE_MAGIC;
     conf.len = sizeof(conf);
     conf.scol = 0;
     conf.sacc = 4;
-    conf.ccs = 0;
-    conf.cdel = 10;
+    conf.ccs = 0; // duco color subtype
+    conf.cdel = 4; // duco delay
     for (d=0; d<NPROG; d++) conf.bri[d] = 3;
-    conf.type = 0;
-    conf.mcnt = 0;
-    conf.zone = 0;
-    conf.speed = 4;
+    conf.type = 3;
+    conf.speed = 4; // sprite speed
     conf.stype = 5; // sprite density
     conf.density = 15;
     conf.cooling = 5;
     conf.sparks = 3;
     conf.flicker = 6;
-    conf.lavacool = 4;
+    conf.lavacool = 3;
     conf.heat = 6;
-    conf.lavaspeed = 5;
+    conf.lavaspeed = 7;
     conf.ctrid = 0x00008421;
   }
   type = conf.type;
-  tim4 = conf.zone;
-  rdclock();
   paramsel(0);
   proginit(1);
+  // rotary encoder uses interrupts
   attachInterrupt (D5, re_read, CHANGE);
   attachInterrupt (D6, re_read, CHANGE);
   base = millis();
-  mts = base;
-}
-
-// color wheel for 4-6-12 steps for time, and 4 steps for daylight zone.
-void lev2col (uint8_t p) {
-  switch (p) {
-    case 0x20: altstCol = state.ColorHSV (65536/4*tim1); break;
-    case 0x21: altstCol = state.ColorHSV (65536/6*tim2); break;
-    case 0x22: altstCol = state.ColorHSV (65536/12*tim3); break;
-    case 0x23: altstCol = state.ColorHSV (65536/4*tim4); break;
-  }
-}
-
-// convert minute counter to 6h-1h-5m steps
-void rdclock() {
-  d = conf.mcnt;
-  tim1 = d / 360;
-  d -= tim1 * 360;
-  tim2 = d / 60;
-  d -= tim2 * 60;
-  tim3 = d / 5;
 }
 
 // select a new parameter
@@ -453,31 +430,17 @@ void paramsel(uint8_t p) {
   res = p;
   altstCol = 0;
   noInterrupts();
-  switch (lev) {
-    case 1: switch (type) {
-      case 0: res = Stars_Param(); break;
-      case 1: res = Candle_Param(); break;
-      case 2: res = Duco_Param(); break;
-      case 3: res = Sprites_Param(); break;
-      case 4: res = Fire_Param(); break;
-      case 5: res = Lava_Param(); break;
-    }
-    if (res == 0) { // no parameter => select prog type
-      stateCol = 0x003f3f3f; // dim wite
-      rec = &type; rem = 5; // prog 0..5
-    }
-    break;
-    case 2: // set time and time frame
-      if (res > 3) res = 0;
-      switch (res) {
-        case 0: rec = &tim1; rem = 3; stateCol = 0x000000ff; break;
-        case 1: rec = &tim2; rem = 5; stateCol = 0x0000ff00; break;
-        case 2: rec = &tim3; rem = 11; stateCol = 0x00ff00ff; break;
-        case 3: rec = &tim4; rem = 3; stateCol = 0x00ffff00; break;
-      }
-      lev2col(0x20 + res);
-    break;
-    break;
+  switch (type) {
+    case 0: res = Stars_Param(); break;
+    case 1: res = Candle_Param(); break;
+    case 2: res = Duco_Param(); break;
+    case 3: res = Sprites_Param(); break;
+    case 4: res = Fire_Param(); break;
+    case 5: res = Lava_Param(); break;
+  }
+  if (res == 0) { // no parameter => select prog type
+    stateCol = 0x003f3f3f; // dim wite
+    rec = &type; rem = 5; // prog 0..5
   }
   interrupts();
 }
@@ -517,15 +480,6 @@ void proginit(uint8_t load)
 
 void loop() {
   now = millis();
-  // clock update
-  d = now - mts;
-  if (d > 59999) {
-    mts += 60000;
-    conf.mcnt++;
-    if (conf.mcnt > 1439) conf.mcnt=0;
-    rdclock();
-    if (lev == 2) lev2col(0x20 + res);
-  }
   // rotary encoder button: switch between parameters type specific
   // bit shift and add over some time to debounce
   reb = (reb << 1) + !digitalRead(D4);
@@ -533,25 +487,9 @@ void loop() {
   if (reb & 0x0f) {
     if (!req) reqts = now, req = 1;  // current event has been noticed
     d = now - reqts;
-    // long press over 1 second => switch to other level
-    if (d > 1000) {
-      switch (lev) {
-        case 1: stateCol = 0x007f7f00; break;
-        case 2: stateCol = 0x007f007f; break;
-      }
-      altstCol = 0;
-      res = 0;
-      req = 2;
-    }
   }
   else if (req == 1) { // release click
     paramsel(++res);
-    req = 0;
-  }
-  else if (req == 2) { // release long click, switch lev=1..2
-    lev++;
-    if (lev > 2) lev=1, res=0;
-    paramsel(res);
     req = 0;
   }
   // check wifi
@@ -561,7 +499,7 @@ void loop() {
   // check rotary encoder
   noInterrupts();
   if (ref || wmc) {
-    if (ref) ren = (lev << 4) + res; // when rotary encoder is changed, store which parameter changed
+    if (ref) ren = res + 0x10; // when rotary encoder is changed, store which parameter changed
     conf_dirty = 1;
     conf_tim = now;
   }
@@ -572,40 +510,22 @@ void loop() {
     if (type != 255) conf.type = type;
     proginit(!wmc); // don't load parameters if from wifi
   }
-  else if ((ren & 0xf0) == 0x20) { // new time
-    lev2col(ren);
-    conf.mcnt = ((tim1 * 6 + tim2) * 12 + tim3) * 5;
-    conf.zone = tim4;
-  }
   else if (ren || wmc & 0x02) { // ren depends on type
     conf.bri[type] = bri;
     strip.setBrightness(convertBrightness());
   }
   // #### LED strip calculations except when type = 255, udp to pixel ####
   if (type != 255) {
-    uint8_t pde = de;
-    switch (tim4) { // disable during day light
-      case 0: de = 1; break;
-      case 1: de = (conf.mcnt < 480 || conf.mcnt > 960) ? 1 : 0; break; // 16-8
-      case 2: de = (conf.mcnt < 420 || conf.mcnt > 1020) ? 1 : 0; break; // 18-7
-      case 3: de = (conf.mcnt < 420 || conf.mcnt > 1200) ? 1 : 0; break; // 20-7
+    // finally we actually run our effect programs:
+    switch (type) {
+      case 0: Stars(); break;
+      case 1: Candles(); break;
+      case 2: Duco(); break;
+      case 3: Sprites(); break;
+      case 4: Fire(); break;
+      case 5: Lava(); break;
     }
-    if (de) {
-      // finally we actually run our effect programs:
-      switch (type) {
-        case 0: Stars(); break;
-        case 1: Candles(); break;
-        case 2: Duco(); break;
-        case 3: Sprites(); break;
-        case 4: Fire(); break;
-        case 5: Lava(); break;
-      }
-      strip.show();
-    }
-    else if (pde) {
-      strip.clear();
-      strip.show();
-    }
+    strip.show();
   }
   // user interface: blink status LED when has been changed and is written to EEPROM
   uint32_t sc = stateCol;
@@ -630,12 +550,14 @@ void loop() {
     d = base - now;
     if (d <= STEP) delay (d);
   }
+  // keep base current
+  else base = now;
 }
 
 // ######################################################################
 // Box-Muller-transformation for gaussian distributed random numbers
 // timing wise: add, mul 0.06µs, div 1.2µs, sqrt 8.2µs, pow 56µs, sin 16µs
-// used by Stars effect
+// used by Stars effect to align the random colors around a (moving) center color.
 
 #define MAX_VAR 0x7fffff80
 
@@ -646,7 +568,7 @@ uint16_t gauss_rand_16 (uint16_t mu, uint16_t var) {
 }
 
 
-// bri 0..15
+// convert range 0 .. 15 => 4 ... 255
 uint8_t convertBrightness(void) {
   float td = 4 * exp (0.277 * bri);
   return td;
@@ -683,6 +605,9 @@ IRAM_ATTR void re_read () {
 
 // ######################################################################
 // sparkling stars all along the LED strip
+// col 0: full spectrum random color
+// col 1: slowly walk the color wheel and align the random colors around
+// col 2..17: manually select a color wheel
 
 #define SINULL 192
 
