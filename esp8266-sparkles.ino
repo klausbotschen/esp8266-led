@@ -18,7 +18,7 @@
 #include "Adafruit_NeoPixel.h"
 #include "entropy.h"
 
-#define LED_CNT 300
+#define LED_CNT 181
 // WS2812B consume 24 bit per LED = 3 bytes
 #define LED_BYTES 3
 // 10 LED/m farytail string: RGB
@@ -27,6 +27,7 @@
 #define LED_UDP (LED_CNT*LED_BYTES/4)
 
 #define SPARKS (LED_CNT*64/100)
+#define LAVASPARKS (LED_CNT / 4)
 #define CANDLES (LED_CNT/25)
 #define MAX_COL 4
 #define SPR_CNT (LED_CNT/3)
@@ -69,6 +70,16 @@ void Sprites_Load(void);
 uint8_t Sprites_Param(void);
 void Sprites(void);
 
+void Fire_Init(void);
+void Fire_Load(void);
+uint8_t Fire_Param(void);
+void Fire(void);
+
+void Lava_Init(void);
+void Lava_Load(void);
+uint8_t Lava_Param(void);
+void Lava(void);
+
 void loadParam(void);
 
 // ######################################################################
@@ -86,6 +97,8 @@ struct
   uint32_t magic, ctrid; // controller ID
   uint16_t mcnt, zone, len;
   uint8_t type, scol, sacc, ccs, cdel, speed, stype, density;
+  uint8_t sparks, cooling, flicker;
+  uint8_t lavacool, heat, lavaspeed;
   uint8_t bri[NPROG];
 } conf;
 
@@ -114,7 +127,7 @@ typedef struct
 
 typedef struct
 {
-  uint16_t ts, gts, del; // timestamp and calculated delay
+  uint16_t ts, gts, del; // timestamp, gradient, and calculated delay
   uint16_t off;     // starting offset
   uint16_t val[MAX_COL];
   float grad[MAX_COL];
@@ -129,6 +142,20 @@ typedef struct
   uint16_t dv[SPR_CNT];
 } sprites_t;
 
+typedef struct
+{
+  uint16_t ts, del;         // timestamp and calculated delay
+  uint8_t heat[LED_CNT];    // current heat
+} fire_t;
+
+typedef struct
+{
+  uint16_t ts, del;         // timestamp and calculated delay
+  uint8_t heat[LED_CNT];    // current heat
+  uint16_t sparks[LAVASPARKS];
+  uint8_t spix;
+} lava_t;
+
 // as only one effect is active at a time, we use a memory union
 static union
 {
@@ -136,6 +163,8 @@ static union
   candle_t candle;
   colors_t colors;
   sprites_t sprites;
+  fire_t fire;
+  lava_t lava;
 };
 
 // ######################################################################
@@ -377,6 +406,12 @@ void setup() {
     conf.speed = 4;
     conf.stype = 5; // sprite density
     conf.density = 15;
+    conf.cooling = 5;
+    conf.sparks = 3;
+    conf.flicker = 6;
+    conf.lavacool = 4;
+    conf.heat = 6;
+    conf.lavaspeed = 5;
     conf.ctrid = 0x00008421;
   }
   type = conf.type;
@@ -424,11 +459,12 @@ void paramsel(uint8_t p) {
       case 1: res = Candle_Param(); break;
       case 2: res = Duco_Param(); break;
       case 3: res = Sprites_Param(); break;
-      case 4: res = Test_Param(); break;
+      case 4: res = Fire_Param(); break;
+      case 5: res = Lava_Param(); break;
     }
     if (res == 0) { // no parameter => select prog type
       stateCol = 0x003f3f3f; // dim wite
-      rec = &type; rem = 4; // prog 0..4
+      rec = &type; rem = 5; // prog 0..5
     }
     break;
     case 2: // set time and time frame
@@ -454,6 +490,8 @@ void loadParam()
     case 0: Stars_Load(); break;
     case 2: Duco_Load(); break;
     case 3: Sprites_Load(); break;
+    case 4: Fire_Load(); break;
+    case 5: Lava_Load(); break;
   }
 }
 
@@ -465,7 +503,8 @@ void proginit(uint8_t load)
     case 1: Candle_Init(); break;
     case 2: Duco_Init(); break;
     case 3: Sprites_Init(); break;
-    case 4: Test_Init(); break;
+    case 4: Fire_Init(); break;
+    case 5: Lava_Init(); break;
   }
 }
 
@@ -487,12 +526,15 @@ void loop() {
     rdclock();
     if (lev == 2) lev2col(0x20 + res);
   }
-  // button: switch between parameters type specific
+  // rotary encoder button: switch between parameters type specific
+  // bit shift and add over some time to debounce
   reb = (reb << 1) + !digitalRead(D4);
-  if (reb & 0x0f) { // debounce
+  // when pressed over 4 cycles, recognize a press
+  if (reb & 0x0f) {
     if (!req) reqts = now, req = 1;  // current event has been noticed
     d = now - reqts;
-    if (d > 1000) { // switch to next level
+    // long press over 1 second => switch to other level
+    if (d > 1000) {
       switch (lev) {
         case 1: stateCol = 0x007f7f00; break;
         case 2: stateCol = 0x007f007f; break;
@@ -513,7 +555,7 @@ void loop() {
     req = 0;
   }
   // check wifi
-  wmc = 0;
+  wmc = 0; // wmc holds which parameters have been set via WiFi
   if (WiFi.status() == WL_CONNECTED) handleIP();
   ren = 0; // assume nothing changed, disable interrupts to sync flag handling
   // check rotary encoder
@@ -555,7 +597,8 @@ void loop() {
         case 1: Candles(); break;
         case 2: Duco(); break;
         case 3: Sprites(); break;
-        case 4: Test(); break;
+        case 4: Fire(); break;
+        case 5: Lava(); break;
       }
       strip.show();
     }
@@ -581,8 +624,8 @@ void loop() {
   }
   state.setPixelColor(0, sc);
   state.show();
-  // no delay when udp to pixel, otherwise we wait
-  if (type != 255) {
+  // no delay when udp, also fire and lava have their own delay
+  if (type != 255 && type != 4 && type != 5) {
     base += STEP;
     d = base - now;
     if (d <= STEP) delay (d);
@@ -847,8 +890,10 @@ uint8_t Candle_Param() {
 }
 
 // ######################################################################
-// toggle between colors
+// toggle between colors, in 3 variations - 2 different color sets, and
+// a mode that gradually changes colors between the color sets.
 
+// effect speed with time delay:
 // curve fitting 1 ... 16 => 10 ... 1500 with y = a e^bx
 // log y = log a + bx log e
 // Y = A + Bx
@@ -858,7 +903,6 @@ uint8_t Candle_Param() {
 // => 51.82 = 17 A + 257 B
 // A = 0.8546 => a = 7.155
 // B = 0.1451 => b = 0.334
-
 // del: 0 = stop, 1..16 => 16..1
 uint16_t Duco_Delay(void) {
   conf.cdel = del;
@@ -1056,34 +1100,206 @@ uint8_t Sprites_Param() {
 }
 
 // ######################################################################
-// was only written to distinguish between RGB and RBG chips
 
-void Test_Init(void)
-{
+// effect speed (flickering)
+// curve fitting 0 ... 15 => 5 ... 96 with y = a e^bx
+uint16_t Fire_Delay(void) {
+  float td = 5.0 * exp (0.197 * del);
+  return td;
 }
 
-void Test(void)
+void Fire_Load(void)
+{
+  col = conf.cooling;
+  dens = conf.sparks;
+  del = conf.flicker;
+  fire.del = Fire_Delay();
+}
+
+void Fire_Init(void)
+{
+  Fire_Load();
+  fire.ts = now - fire.del;
+}
+
+
+void Fire(void)
 {
   uint16_t i;
-  uint32_t hsv;
-  for (i=0; i<LED_CNT; i++) {
-    switch (col) {
-      case 0: hsv = 0x000000ff; break;
-      case 1: hsv = 0x0000ff00; break;
-      case 2: hsv = 0x00ff0000; break;
-      case 3: hsv = 0x00ffffff; break;
-    }
-    strip.setPixelColor(i, hsv);
+
+  // update parameters
+  if (ren == 0x11 || wmc & 0x04) { // cooling
+    if (col > 15) col = 15;
+    conf.cooling = col;
   }
+  if (ren == 0x12 || wmc & 0x08) { // flicker speed
+    if (del > 15) del = 15;
+    conf.flicker = del;
+    fire.del = Fire_Delay();
+  }
+  if (ren == 0x13 || wmc & 0x10) { // density
+    if (dens > 15) dens = 15;
+    conf.sparks = dens;
+  }
+
+  // just return when cycle time is not yet reached
+  uint16_t d = now - fire.ts;
+  if (d < fire.del) return;
+  fire.ts = now;
+
+  // cool down every cell a little
+  for (i=0; i<LED_CNT; i++) {
+    uint8_t cooldown = getRandRange(col);
+    if (cooldown > fire.heat[i]) fire.heat[i]=0;
+    else fire.heat[i] = fire.heat[i]-cooldown;
+  }
+  // in each cycle, heat from each cell drifts 'up' and diffuses a little
+  for (i=LED_CNT-1; i>=2; i--) {
+    fire.heat[i] = (fire.heat[i-1] + 2*fire.heat[i-2]) / 3;
+  }
+  // randomly ignite new 'sparks' near the bottom area, which is 2x dens
+  for (i=0; i<dens; i++) {
+    uint16_t y = getRandRange(dens * 2);
+    fire.heat[y] += getRand() & 0x7f; // intentional overflow
+  }
+  // Convert heat to LED colors
+  for (i=0; i<LED_CNT; i++)
+    strip.setPixelColor(i, getPixelHeatColor (fire.heat[i]));
 }
 
-uint8_t Test_Param() {
+uint8_t Fire_Param() {
   switch (res) {
-      case 1: rec = &col; rem = 3; stateCol = 0x000000ff; break;
-      case 2: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+      case 1: rec = &col; rem = 15; stateCol = 0x000000ff; break;
+      case 2: rec = &del; rem = 15; stateCol = 0x0000ff00; break;
+      case 3: rec = &dens; rem = 15; stateCol = 0x00ff00ff; break;
+      case 4: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
   return res;
 }
+
+// ######################################################################
+// The floor is lava
+
+void Lava_Load(void)
+{
+  col = conf.lavacool;
+  dens = conf.heat;
+  del = conf.lavaspeed;
+  lava.del = Fire_Delay();
+}
+
+void Lava_Init(void)
+{
+  uint16_t i;
+
+  Lava_Load();
+  lava.ts = now - lava.del;
+
+  for (i=0; i<LAVASPARKS; i++)
+    lava.sparks[i] = random(LED_CNT);
+  for (i=0; i<LED_CNT; i++)
+    lava.heat[i] = getRand() >> 8;
+  lava.spix = 0;
+}
+
+void Lava(void)
+{
+  uint32_t temp = 0;
+  uint16_t i;
+
+  // update parameters
+  if (ren == 0x11 || wmc & 0x04) { // cooling
+    if (col > 15) col = 15;
+    conf.lavacool = col;
+  }
+  if (ren == 0x12 || wmc & 0x08) { // lavaspeed
+    if (del > 15) del = 15;
+    conf.lavaspeed = del;
+    lava.del = Fire_Delay();
+  }
+  if (ren == 0x13 || wmc & 0x10) { // heat
+    if (dens > 15) dens = 15;
+    conf.heat = dens;
+  }
+
+  // just return when cycle time is not yet reached
+  uint16_t d = now - lava.ts;
+  if (d < lava.del) return;
+  lava.ts = now;
+
+  // Cool down every cell a little
+  for (i=0; i<LED_CNT; i++) {
+    uint8_t cooldown = getRandRange(col);
+    if (cooldown > lava.heat[i]) lava.heat[i]=0;
+    else lava.heat[i] = lava.heat[i]-cooldown;
+    temp += lava.heat[i];
+  }
+
+  // check temperature and sparks, when too low, add sparks
+  temp = temp / LED_CNT;
+  if (temp < 100) for (i=0; i<LAVASPARKS; i++) {
+    uint16_t t = lava.heat[lava.sparks[i]] + dens;
+    lava.heat[lava.sparks[i]] = t>255?255:t;
+  }
+  lava.sparks[lava.spix] = random(LED_CNT);
+  lava.spix++; if (lava.spix > LAVASPARKS) lava.spix = 0;
+
+  // heat from each cell diffuses a little
+  for (i=1; i<LED_CNT-1; i++) {
+    lava.heat[i] = (lava.heat[i+1] + (lava.heat[i]<<1) + lava.heat[i-1]) >> 2;
+  }
+  // first and last LED get special treatment, include the first LED from the other side
+  lava.heat[0] = (lava.heat[1] + (lava.heat[0]<<1) + lava.heat[LED_CNT-1]) >> 2;
+  lava.heat[LED_CNT-1] = (lava.heat[0] + (lava.heat[LED_CNT-1]<<1) + lava.heat[LED_CNT-2]) >> 2;
+
+  // Convert heat to LED colors
+  for (i=0; i<LED_CNT; i++)
+    strip.setPixelColor(i, getPixelHeatColor (lava.heat[i]));
+}
+
+uint8_t Lava_Param() {
+  switch (res) {
+      case 1: rec = &col; rem = 15; stateCol = 0x000000ff; break;
+      case 2: rec = &del; rem = 15; stateCol = 0x0000ff00; break;
+      case 3: rec = &dens; rem = 15; stateCol = 0x00ff00ff; break;
+      case 4: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+      default: return 0;
+  }
+  return res;
+}
+
+
+
+// ######################################################################
+// was only written to distinguish between RGB and RBG chips
+
+// void Test_Init(void)
+// {
+// }
+
+// void Test(void)
+// {
+//   uint16_t i;
+//   uint32_t hsv;
+//   for (i=0; i<LED_CNT; i++) {
+//     switch (col) {
+//       case 0: hsv = 0x000000ff; break;
+//       case 1: hsv = 0x0000ff00; break;
+//       case 2: hsv = 0x00ff0000; break;
+//       case 3: hsv = 0x00ffffff; break;
+//     }
+//     strip.setPixelColor(i, hsv);
+//   }
+// }
+
+// uint8_t Test_Param() {
+//   switch (res) {
+//       case 1: rec = &col; rem = 3; stateCol = 0x000000ff; break;
+//       case 2: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+//       default: return 0;
+//   }
+//   return res;
+// }
 
 // ######################################################################
