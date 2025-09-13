@@ -84,10 +84,8 @@ void loadParam(void);
 
 // ######################################################################
 
-#define NPROG 8
-
-// variables that are set in interrupt handling (rotary encoder)
-volatile uint8_t type=0, col=0, bri=3, del=0, dens=0;
+// number of effects
+#define NPROG 6
 
 // this datastructure is stored in the EEPROM
 // and holds all necessary config entries for all effects.
@@ -176,10 +174,12 @@ void paramsel(uint8_t);
 void proginit(uint8_t load);
 void rdclock(void);
 
-// rotary encoder handling
-volatile uint8_t rep=0x0f, red=0, rem, *rec, ref=0; // ref: flag for change
-uint8_t wmc, ren, reb=0, res=0;  // res: parameter, ren set to res when ref=1
-uint8_t req=0, de=0; // switch request, display enable
+// variables that are set in interrupt handling (rotary encoder)
+volatile uint8_t type=0, col=0, bri=3, del=0, dens=0;
+volatile uint8_t re_max, *re_val_ptr, re_flag=0; // re_flag: flag for change
+uint8_t wifi_param, re_param, re_debounce=0, re_selector=0;  // re_selector: parameter, re_param set to re_selector when re_flag=1
+uint8_t re_click=0; // switch request, 1..click, 2..long click
+uint8_t re_level = 1; // UI parameter level, 1..effects, 2..settings
 uint16_t reqts; // switch pressed
 void re_read(void);
 
@@ -243,13 +243,13 @@ void handleCommand(uint8_t *rt, uint16_t len) {
       else if (cval >= 'A') cval -= 'A'-10;
       else cval -= '0';
       switch (cmd) {
-        case 'p': wmc|=0x01; cmd = 0; type = cval; loadParam(); break;
-        case 'b': wmc|=0x02; cmd = 0; bri = cval; break;
-        case 'c': wmc|=0x04; cmd = 0; col = cval; break;
-        case 's': wmc|=0x08; cmd = 0; del = cval; break;
-        case 'd': wmc|=0x10; cmd = 0; dens = cval; break;
+        case 'p': wifi_param|=0x01; cmd = 0; type = cval; loadParam(); break;
+        case 'b': wifi_param|=0x02; cmd = 0; bri = cval; break;
+        case 'c': wifi_param|=0x04; cmd = 0; col = cval; break;
+        case 's': wifi_param|=0x08; cmd = 0; del = cval; break;
+        case 'd': wifi_param|=0x10; cmd = 0; dens = cval; break;
         // receive a new 8 HEX digit board ID
-        case 'i': wmc|=0x11;
+        case 'i': wifi_param|=0x11;
         ctrid <<= 4; ctrid += cval; idc++;
         if (idc >= 8) { conf.ctrid=ctrid; idc=0; cmd=0; *alivePkt=0; }
         break;
@@ -423,28 +423,40 @@ void setup() {
 }
 
 // select a new parameter
-// level 1: depending on prog type get the parameters
-// lebel 2: time config
-// set encoder handling: (rec and rem), therefore disable interrupts
 void paramsel(uint8_t p) {
-  res = p;
+  re_selector = p;
   altstCol = 0;
+// we set encoder handling: (re_val_ptr and re_max), therefore disable interrupts
   noInterrupts();
-  switch (type) {
-    case 0: res = Stars_Param(); break;
-    case 1: res = Candle_Param(); break;
-    case 2: res = Duco_Param(); break;
-    case 3: res = Sprites_Param(); break;
-    case 4: res = Fire_Param(); break;
-    case 5: res = Lava_Param(); break;
-  }
-  if (res == 0) { // no parameter => select prog type
-    stateCol = 0x003f3f3f; // dim wite
-    rec = &type; rem = 5; // prog 0..5
+  switch (re_level) {
+    case 1: // depending on prog type get the parameters
+    switch (type) {
+      case 0: re_selector = Stars_Param(); break;
+      case 1: re_selector = Candle_Param(); break;
+      case 2: re_selector = Duco_Param(); break;
+      case 3: re_selector = Sprites_Param(); break;
+      case 4: re_selector = Fire_Param(); break;
+      case 5: re_selector = Lava_Param(); break;
+    }
+    if (re_selector == 0) { // no parameter => select prog type
+      stateCol = 0x003f3f3f; // dim wite
+      re_val_ptr = &type; re_max = NPROG-1; // select the effect
+    }
+    break;
+    case 2: // set string/strip config
+    if (re_selector > 2) re_selector = 0;
+    switch (re_selector) {
+      case 0: re_val_ptr = &slen; re_max = 3; stateCol = 0x000000ff; break;
+      case 1: re_val_ptr = &srgb; re_max = 2; stateCol = 0x0000ff00; break;
+      case 2: re_val_ptr = &split; re_max = 2; stateCol = 0x00ff00ff; break;
+    }
+    lev2col(0x20 + re_selector);
+    break;
   }
   interrupts();
 }
 
+// load values from the EEPROM config structure
 void loadParam()
 {
   bri = conf.bri[type];
@@ -482,35 +494,52 @@ void loop() {
   now = millis();
   // rotary encoder button: switch between parameters type specific
   // bit shift and add over some time to debounce
-  reb = (reb << 1) + !digitalRead(D4);
+  re_debounce = (re_debounce << 1) + !digitalRead(D4);
   // when pressed over 4 cycles, recognize a press
-  if (reb & 0x0f) {
-    if (!req) reqts = now, req = 1;  // current event has been noticed
+  if (re_debounce & 0x0f) {
+    if (!re_click) reqts = now, re_click = 1;  // current event has been noticed
     d = now - reqts;
+    // long press over 1 second => switch to other level
+    if (d > 1000) {
+      switch (re_level) {
+        case 1: stateCol = 0x007f7f00; break;
+        case 2: stateCol = 0x007f007f; break;
+      }
+      altstCol = 0;
+      re_selector = 0;
+      re_click = 2;
+    }
   }
-  else if (req == 1) { // release click
-    paramsel(++res);
-    req = 0;
+  else if (re_click == 1) { // release click
+    paramsel(++re_selector);
+    re_click = 0;
+  }
+  else if (re_click == 2) { // release long click, switch level=1..2
+    re_level++;
+    if (re_level > 2) re_level=1, re_selector=0;
+    paramsel(re_selector);
+    re_click = 0;
   }
   // check wifi
-  wmc = 0; // wmc holds which parameters have been set via WiFi
+  wifi_param = 0; // wifi_param holds which parameters have been set via WiFi
   if (WiFi.status() == WL_CONNECTED) handleIP();
-  ren = 0; // assume nothing changed, disable interrupts to sync flag handling
-  // check rotary encoder
+  re_param = 0; // assume nothing changed, disable interrupts to sync flag handling
+  // disable interrupt while we check rotary encoder values
   noInterrupts();
-  if (ref || wmc) {
-    if (ref) ren = res + 0x10; // when rotary encoder is changed, store which parameter changed
+  if (re_flag || wifi_param) {
+    // when rotary encoder is changed, store which parameter changed
+    if (re_flag) re_param = re_selector + (re_level << 4);
     conf_dirty = 1;
     conf_tim = now;
   }
-  ref = 0; // clear flag
+  re_flag = 0; // clear flag
   interrupts();
-  // #### ren = which parameter was changed ####
-  if (ren == 0x10 || wmc & 0x01) {   // new program type
+  // #### re_param = which parameter was changed ####
+  if (re_param == 0x10 || wifi_param & 0x01) {   // new program type
     if (type != 255) conf.type = type;
-    proginit(!wmc); // don't load parameters if from wifi
+    proginit(!wifi_param); // don't load parameters if from wifi
   }
-  else if (ren || wmc & 0x02) { // ren depends on type
+  else if (re_param || wifi_param & 0x02) { // re_param depends on type
     conf.bri[type] = bri;
     strip.setBrightness(convertBrightness());
   }
@@ -576,8 +605,10 @@ uint8_t convertBrightness(void) {
 
 // ######################################################################
 // rotary encoder interrupt driven state machine
-// input: rem = max value
-// output: *rec = int value 0..rem, ref = 1 when update
+// input: re_max = max value
+// output: *re_val_ptr = int value in the interval [0..re_max], and re_flag = 1 when new value
+
+volatile uint8_t rep=0x0f, red=0;
 
 IRAM_ATTR void re_read () {
   rep = (rep << 1) + digitalRead(D6);
@@ -586,18 +617,18 @@ IRAM_ATTR void re_read () {
   switch (rep) {
     case 0b1110: red = 'p'; break;
     case 0b1011: if (red == 'n') {
-      if (*rec) (*rec)--;
-      else *rec = rem;
+      if (*re_val_ptr) (*re_val_ptr)--;
+      else *re_val_ptr = re_max; // turn around
       red = 0;
-      ref = 1;  // raise flag
+      re_flag = 1;  // raise flag
     }
     break;
     case 0b1101: red = 'n'; break;
     case 0b0111: if (red == 'p') {
-      if (*rec == rem) *rec = 0;
-      else (*rec)++;
+      if (*re_val_ptr == re_max) *re_val_ptr = 0; // turn aroud
+      else (*re_val_ptr)++;
       red = 0;
-      ref = 1;  // raise flag
+      re_flag = 1;  // raise flag
     }
     break;
   }
@@ -695,16 +726,16 @@ void Stars(void)
   }
   sparks.hue += 16; // slowly walk the color wheel, 41 seconds the round
   // parameter update
-  if (ren == 0x11 || wmc & 0x04) { // color wheel
+  if (re_param == 0x11 || wifi_param & 0x04) { // color wheel
     if (col > 17) col = 17;
     Stars_DispCol(col);
     conf.scol = col;
   }
-  if (ren == 0x12 || wmc & 0x08) { // acceleration
+  if (re_param == 0x12 || wifi_param & 0x08) { // acceleration
     if (del > 8) del = 8;
     conf.sacc = del;
   }
-  if (ren == 0x13 || wmc & 0x10) { // density
+  if (re_param == 0x13 || wifi_param & 0x10) { // density
     if (dens > 15) dens = 15;
     conf.density = dens;
     Stars_Init();
@@ -730,14 +761,14 @@ uint16_t getNewPos()
 }
 
 uint8_t Stars_Param() {
-  switch (res) {
-      case 1: rec = &col; rem = 17; stateCol = 0x000000ff; Stars_DispCol(col); break;
-      case 2: rec = &del; rem = 8; stateCol = 0x0000ff00; break;
-      case 3: rec = &dens; rem = 15; stateCol = 0x00ff00ff; break;
-      case 4: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+  switch (re_selector) {
+      case 1: re_val_ptr = &col; re_max = 17; stateCol = 0x000000ff; Stars_DispCol(col); break;
+      case 2: re_val_ptr = &del; re_max = 8; stateCol = 0x0000ff00; break;
+      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x00ff00ff; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
-  return res;
+  return re_selector;
 }
 
 // ######################################################################
@@ -807,11 +838,11 @@ uint32_t getPixelHeatColor (uint16_t temperature)
 }
 
 uint8_t Candle_Param() {
-  switch (res) {
-      case 1: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+  switch (re_selector) {
+      case 1: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
-  return res;
+  return re_selector;
 }
 
 // ######################################################################
@@ -883,11 +914,11 @@ void Duco()
   if (gd >= 40000) colors.gts += 40000, gd -= 40000;
   if (gd > 20000) gd = 40000 - gd;
   // update parameters
-  if (ren == 0x11 || wmc & 0x04) { // color wheel
+  if (re_param == 0x11 || wifi_param & 0x04) { // color wheel
     if (col > 3) col = 3;
     conf.ccs = col; Duco_Select(col);
   }
-  if (ren == 0x12 || wmc & 0x08) { // speed, 0=stop, 1..16
+  if (re_param == 0x12 || wifi_param & 0x08) { // speed, 0=stop, 1..16
     if (del > 16) del = 16;
     colors.del = Duco_Delay();
   }
@@ -911,13 +942,13 @@ void Duco()
 }
 
 uint8_t Duco_Param() {
-  switch (res) {
-      case 1: rec = &col; rem = 3; stateCol = 0x000000ff; break;
-      case 2: rec = &del; rem = 16; stateCol = 0x0000ff00; break;
-      case 3: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+  switch (re_selector) {
+      case 1: re_val_ptr = &col; re_max = 3; stateCol = 0x000000ff; break;
+      case 2: re_val_ptr = &del; re_max = 16; stateCol = 0x0000ff00; break;
+      case 3: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
-  return res;
+  return re_selector;
 }
 
 // ######################################################################
@@ -964,11 +995,11 @@ void Sprites(void)
   uint8_t coll=0; // 1 when a sprite is in the start ramp
 
   // update parameters
-  if (ren == 0x11 || wmc & 0x10) { // density
+  if (re_param == 0x11 || wifi_param & 0x10) { // density
     if (dens > 8) dens = 8;
     conf.stype = dens;
   }
-  if (ren == 0x12 || wmc & 0x08) { // acceleration
+  if (re_param == 0x12 || wifi_param & 0x08) { // acceleration
     if (del > 15) del = 15;
     conf.speed = del;
     sprites.s1 = sprites_speed(del);
@@ -1015,13 +1046,13 @@ void Sprites(void)
 }
 
 uint8_t Sprites_Param() {
-  switch (res) {
-      case 1: rec = &dens; rem = 8; stateCol = 0x000000ff; break;
-      case 2: rec = &del; rem = 15; stateCol = 0x0000ff00; break;
-      case 3: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+  switch (re_selector) {
+      case 1: re_val_ptr = &dens; re_max = 8; stateCol = 0x000000ff; break;
+      case 2: re_val_ptr = &del; re_max = 15; stateCol = 0x0000ff00; break;
+      case 3: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
-  return res;
+  return re_selector;
 }
 
 // ######################################################################
@@ -1053,16 +1084,16 @@ void Fire(void)
   uint16_t i;
 
   // update parameters
-  if (ren == 0x11 || wmc & 0x04) { // cooling
+  if (re_param == 0x11 || wifi_param & 0x04) { // cooling
     if (col > 15) col = 15;
     conf.cooling = col;
   }
-  if (ren == 0x12 || wmc & 0x08) { // flicker speed
+  if (re_param == 0x12 || wifi_param & 0x08) { // flicker speed
     if (del > 15) del = 15;
     conf.flicker = del;
     fire.del = Fire_Delay();
   }
-  if (ren == 0x13 || wmc & 0x10) { // density
+  if (re_param == 0x13 || wifi_param & 0x10) { // density
     if (dens > 15) dens = 15;
     conf.sparks = dens;
   }
@@ -1093,14 +1124,14 @@ void Fire(void)
 }
 
 uint8_t Fire_Param() {
-  switch (res) {
-      case 1: rec = &col; rem = 15; stateCol = 0x000000ff; break;
-      case 2: rec = &del; rem = 15; stateCol = 0x0000ff00; break;
-      case 3: rec = &dens; rem = 15; stateCol = 0x00ff00ff; break;
-      case 4: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+  switch (re_selector) {
+      case 1: re_val_ptr = &col; re_max = 15; stateCol = 0x000000ff; break;
+      case 2: re_val_ptr = &del; re_max = 15; stateCol = 0x0000ff00; break;
+      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x00ff00ff; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
-  return res;
+  return re_selector;
 }
 
 // ######################################################################
@@ -1134,16 +1165,16 @@ void Lava(void)
   uint16_t i;
 
   // update parameters
-  if (ren == 0x11 || wmc & 0x04) { // cooling
+  if (re_param == 0x11 || wifi_param & 0x04) { // cooling
     if (col > 15) col = 15;
     conf.lavacool = col;
   }
-  if (ren == 0x12 || wmc & 0x08) { // lavaspeed
+  if (re_param == 0x12 || wifi_param & 0x08) { // lavaspeed
     if (del > 15) del = 15;
     conf.lavaspeed = del;
     lava.del = Fire_Delay();
   }
-  if (ren == 0x13 || wmc & 0x10) { // heat
+  if (re_param == 0x13 || wifi_param & 0x10) { // heat
     if (dens > 15) dens = 15;
     conf.heat = dens;
   }
@@ -1184,14 +1215,14 @@ void Lava(void)
 }
 
 uint8_t Lava_Param() {
-  switch (res) {
-      case 1: rec = &col; rem = 15; stateCol = 0x000000ff; break;
-      case 2: rec = &del; rem = 15; stateCol = 0x0000ff00; break;
-      case 3: rec = &dens; rem = 15; stateCol = 0x00ff00ff; break;
-      case 4: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+  switch (re_selector) {
+      case 1: re_val_ptr = &col; re_max = 15; stateCol = 0x000000ff; break;
+      case 2: re_val_ptr = &del; re_max = 15; stateCol = 0x0000ff00; break;
+      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x00ff00ff; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
-  return res;
+  return re_selector;
 }
 
 
@@ -1219,12 +1250,12 @@ uint8_t Lava_Param() {
 // }
 
 // uint8_t Test_Param() {
-//   switch (res) {
-//       case 1: rec = &col; rem = 3; stateCol = 0x000000ff; break;
-//       case 2: rec = &bri; rem = 15; stateCol = 0x00ff0000; break;
+//   switch (re_selector) {
+//       case 1: re_val_ptr = &col; re_max = 3; stateCol = 0x000000ff; break;
+//       case 2: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
 //       default: return 0;
 //   }
-//   return res;
+//   return re_selector;
 // }
 
 // ######################################################################
