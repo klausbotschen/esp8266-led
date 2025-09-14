@@ -18,7 +18,8 @@
 #include "Adafruit_NeoPixel.h"
 #include "entropy.h"
 
-#define LED_CNT 181
+// max value, used only for storage allocation
+#define LED_CNT 800
 // WS2812B consume 24 bit per LED = 3 bytes
 #define LED_BYTES 3
 // 10 LED/m farytail string: RGB
@@ -92,7 +93,9 @@ void loadParam(void);
 struct
 {
   uint32_t magic, ctrid; // controller ID
-  uint16_t len;
+  uint16_t len; // size of this struct
+  uint8_t slen, srgb, split; // configuration of the LED strip/string
+  // effect configurations
   uint8_t type, scol, sacc, ccs, cdel, speed, stype, density;
   uint8_t sparks, cooling, flicker;
   uint8_t lavacool, heat, lavaspeed;
@@ -116,6 +119,7 @@ typedef struct
 typedef struct
 {
   uint16_t ts;              // timestamp
+  uint16_t candles;         // derived from led_cnt
   uint8_t heat[LED_CNT];    // current candle heat
   uint16_t sparks[CANDLES]; // index of flickering candles
   uint16_t timer[CANDLES];  // start time
@@ -166,7 +170,7 @@ static union
 
 // ######################################################################
 
-uint16_t base, now, conf_tim, alive_tim, d;
+uint16_t base, now, conf_tim, alive_tim, d, led_cnt;
 uint8_t conf_dirty, inacnt;
 uint32_t stateCol, altstCol=0;
 
@@ -175,7 +179,7 @@ void proginit(uint8_t load);
 void rdclock(void);
 
 // variables that are set in interrupt handling (rotary encoder)
-volatile uint8_t type=0, col=0, bri=3, del=0, dens=0;
+volatile uint8_t type=0, col=0, bri=3, del=0, dens=0, slen=0, srgb=0, split=0;
 volatile uint8_t re_max, *re_val_ptr, re_flag=0; // re_flag: flag for change
 uint8_t wifi_param, re_param, re_debounce=0, re_selector=0;  // re_selector: parameter, re_param set to re_selector when re_flag=1
 uint8_t re_click=0; // switch request, 1..click, 2..long click
@@ -348,6 +352,33 @@ void handleIP() {
 
 // ######################################################################
 
+// strip/string configuration was updated, re-configure neopixel library
+void strip_config(void) {
+  uint16_t led_type = 0;
+
+  conf.slen = slen;
+  conf.srgb = srgb;
+  conf.split = split;
+  switch (slen) {
+    case 0: led_cnt = 100; break;
+    case 1: led_cnt = 120; break;
+    case 2: led_cnt = 181; break;
+    case 3: led_cnt = 200; break;
+  }
+  switch (split) {
+    case 0: led_type = NEO_NOSPLIT; break;
+    case 1: led_type = NEO_SPLIT2; led_cnt *= 2; break;
+    case 2: led_type = NEO_SPLIT4; led_cnt *= 4; break;
+  }
+  switch (srgb) {
+    case 0: led_type &= NEO_RBG; break;
+    case 1: led_type &= NEO_GRB; break;
+  }
+  strip.updateType(led_type);
+  strip.updateLength(led_cnt);
+}
+
+
 // called once at startup
 
 void setup() {
@@ -383,7 +414,6 @@ void setup() {
   pinMode(D4, INPUT);
   pinMode(D5, INPUT);
   pinMode(D6, INPUT);
-  strip.begin();
   state.begin();
   state.setBrightness(8);
 
@@ -396,6 +426,9 @@ void setup() {
   {
     conf.magic = EE_MAGIC;
     conf.len = sizeof(conf);
+    conf.slen = 2; // 0=100, 1=120, 2=181, 3=200
+    conf.srgb = 0; // 0=RGB for string, 1=GRB for strip
+    conf.split = 1; // 0=NOSPLIT, 1=SPLIT2, 2=SPLIT4
     conf.scol = 0;
     conf.sacc = 4;
     conf.ccs = 0; // duco color subtype
@@ -414,6 +447,10 @@ void setup() {
     conf.ctrid = 0x00008421;
   }
   type = conf.type;
+  slen = conf.slen;
+  srgb = conf.srgb;
+  split = conf.split;
+  strip_config();
   paramsel(0);
   proginit(1);
   // rotary encoder uses interrupts
@@ -447,13 +484,20 @@ void paramsel(uint8_t p) {
     if (re_selector > 2) re_selector = 0;
     switch (re_selector) {
       case 0: re_val_ptr = &slen; re_max = 3; stateCol = 0x000000ff; break;
-      case 1: re_val_ptr = &srgb; re_max = 2; stateCol = 0x0000ff00; break;
+      case 1: re_val_ptr = &srgb; re_max = 1; stateCol = 0x0000ff00; break;
       case 2: re_val_ptr = &split; re_max = 2; stateCol = 0x00ff00ff; break;
     }
-    lev2col(0x20 + re_selector);
+    // color wheel for 2nd level parameter values
+    altstCol = state.ColorHSV (65536/(re_max+1) * (*re_val_ptr));
     break;
   }
   interrupts();
+}
+
+// convert range 0 .. 15 => 4 ... 255
+uint8_t convertBrightness(void) {
+  float td = 4 * exp (0.277 * bri);
+  return td;
 }
 
 // load values from the EEPROM config structure
@@ -539,7 +583,11 @@ void loop() {
     if (type != 255) conf.type = type;
     proginit(!wifi_param); // don't load parameters if from wifi
   }
-  else if (re_param || wifi_param & 0x02) { // re_param depends on type
+  else if ((re_param & 0xf0) == 0x20) { // anything in level 2: update strip
+    strip_config();
+  }
+  else if (re_param || wifi_param & 0x02) { // any other parameter
+    // just in case update brightness, all other parameter are handled in realtime
     conf.bri[type] = bri;
     strip.setBrightness(convertBrightness());
   }
@@ -594,13 +642,6 @@ uint16_t gauss_rand_16 (uint16_t mu, uint16_t var) {
   float r1 = (float) random(MAX_VAR) / MAX_VAR;
   float r2 = (float) random(1, MAX_VAR) / MAX_VAR; // avoid 0
   return mu + (float) var * cos (2*PI*r1) * sqrt(-log(r2));
-}
-
-
-// convert range 0 .. 15 => 4 ... 255
-uint8_t convertBrightness(void) {
-  float td = 4 * exp (0.277 * bri);
-  return td;
 }
 
 // ######################################################################
@@ -688,9 +729,12 @@ void Stars_Load(void)
 
 void Stars_Init(void)
 {
+  uint16_t i, cnt = led_cnt*64/100;
+
   sparks.hue = 0; // walking the circle
-  dcnt = LED_CNT * ((dens+1) << 2) / 100;
-  for (uint16_t i=0; i<SPARKS; i++)
+  dcnt = led_cnt * ((dens+1) << 2) / 100;
+  // cnt is the maximal density, dcnt can be lower
+  for (i=0; i<cnt; i++)
   {
     if (i < dcnt) {
       sparks.t0[i] = now - random(0x07ff);
@@ -707,7 +751,9 @@ void Stars_Init(void)
 
 void Stars(void)
 {
-  for (uint16_t i=0; i<dcnt; i++)
+  uint16_t i;
+
+  for (i=0; i<dcnt; i++)
   {
     uint16_t p = sparks.pos[i];
     uint16_t d = now - sparks.t0[i];
@@ -745,14 +791,14 @@ void Stars(void)
 uint16_t getNewPos()
 {
   uint16_t i = 0;
-  uint16_t a, b = random(LED_CNT);
+  uint16_t a, b = random(led_cnt);
 
   while (i<dcnt) // check if the selected LED is already taken
   {
     a = sparks.pos[i];
     if (a == b) // if taken, try a new one
     {
-      b = random(LED_CNT);
+      b = random(led_cnt);
       i = 0;
     }
     else i++;
@@ -776,14 +822,15 @@ uint8_t Stars_Param() {
 
 #define SPXDELAY 92
 #define BASE 112
+#define CA_DENS 25
 
 uint32_t getPixelHeatColor (uint16_t temperature);
 
 void Candle_Init(void)
 {
-  uint16_t i;
-  for (i=0; i<CANDLES; i++) {
-    candle.sparks[i] = random(LED_CNT);
+  uint16_t i, cnt = led_cnt / CA_DENS;
+  for (i=0; i<cnt; i++) {
+    candle.sparks[i] = random(led_cnt);
     candle.timer[i] = now;
     candle.dur[i] = random(2000, 5000);
   }
@@ -793,30 +840,30 @@ void Candle_Init(void)
 void Candles(void)
 {
   uint32_t temp;
-  uint16_t i;
+  uint16_t i, cnt = led_cnt / CA_DENS;
 
   uint16_t d = now - candle.ts;
   if (d < SPXDELAY) return;
   candle.ts = now;
   // all candles flickering
-  for (i=0; i<LED_CNT; i++)
+  for (i=0; i<led_cnt; i++)
   {
     temp = BASE+getRandRange(4);
     candle.heat[i] = temp;
   }
-  for (i=0; i<CANDLES; i++)
+  for (i=0; i<cnt; i++)
   {
     temp = BASE-8+getRandRange(48);
     candle.heat[candle.sparks[i]] = temp;
     d = now - candle.timer[i];
     if (d > candle.dur[i]) {
-      candle.sparks[i] = random(LED_CNT);
+      candle.sparks[i] = random(led_cnt);
       candle.timer[i] = now;
       candle.dur[i] = random(2000, 5000);
     }
   }
   // Convert heat to LED colors
-  for (i=0; i<LED_CNT; i++)
+  for (i=0; i<led_cnt; i++)
     strip.setPixelColor(i, getPixelHeatColor (candle.heat[i]));
 }
 
@@ -927,7 +974,7 @@ void Duco()
     colors.off++;
     if (colors.off == MAX_COL) colors.off = 0;
   }
-  for (i=0; i<LED_CNT; i++) {
+  for (i=0; i<led_cnt; i++) {
     uint16_t v = colors.val[c];
     if (col == 2) v += colors.grad[c] * gd; // gradient handling
     uint32_t hsv = strip.ColorHSV (v);
@@ -971,9 +1018,10 @@ void Sprites_Load(void)
   dens = conf.stype;
 }
 
+// initially just set some random sprites, ignore density setting for now
 void Sprites_Init(void)
 {
-  uint16_t i, h, n = SPR_CNT/3;
+  uint16_t i, h, n = led_cnt/9;
   sprites.iter = 0;
   memset (&sprites, 0, sizeof (sprites_t));
   // speed spread 
@@ -991,7 +1039,7 @@ void Sprites_Init(void)
 
 void Sprites(void)
 {
-  uint16_t i, h, ramp=500*(9-dens);
+  uint16_t i, cnt = led_cnt / 3, h, ramp=500*(9-dens);
   uint8_t coll=0; // 1 when a sprite is in the start ramp
 
   // update parameters
@@ -1006,13 +1054,13 @@ void Sprites(void)
     h = sprites.s1 >> 2;
     sprites.s2 = sprites.s1 + h;
     sprites.s1 -= h;
-    for (i=0; i<SPR_CNT; i++) {
+    for (i=0; i<cnt; i++) {
       if (sprites.v[i]) sprites.v[i] = random(sprites.s1, sprites.s2);
     }
   }
 
   strip.clear();
-  for (i=0; i<SPR_CNT; i++)
+  for (i=0; i<cnt; i++)
   {
     if (!sprites.v[i]) continue;
     uint16_t pp = sprites.pos[i];
@@ -1023,7 +1071,7 @@ void Sprites(void)
     }
     if (pn < ramp) coll = 1; // check if start ramp is free
     sprites.pos[i] = pn; // move to next position
-    uint32_t t = sprites.pos[i] * LED_CNT;
+    uint32_t t = sprites.pos[i] * led_cnt;
     uint8_t ci = (t >> 9) & 0x7f; // half wave
     uint8_t c1 = 64 + ci; // starting at peak
     uint8_t c2 = 192 + ci; // starting at valley
@@ -1038,7 +1086,7 @@ void Sprites(void)
     sprites.pos[i] = 0;
     while (sprites.v[i]) { // find next free sprite
       i++;
-      if (i >= SPR_CNT) i = 0;
+      if (i >= cnt) i = 0;
       if (i == sprites.iter) break;
     }
     sprites.iter = i;
@@ -1104,13 +1152,13 @@ void Fire(void)
   fire.ts = now;
 
   // cool down every cell a little
-  for (i=0; i<LED_CNT; i++) {
+  for (i=0; i<led_cnt; i++) {
     uint8_t cooldown = getRandRange(col);
     if (cooldown > fire.heat[i]) fire.heat[i]=0;
     else fire.heat[i] = fire.heat[i]-cooldown;
   }
   // in each cycle, heat from each cell drifts 'up' and diffuses a little
-  for (i=LED_CNT-1; i>=2; i--) {
+  for (i=led_cnt-1; i>=2; i--) {
     fire.heat[i] = (fire.heat[i-1] + 2*fire.heat[i-2]) / 3;
   }
   // randomly ignite new 'sparks' near the bottom area, which is 2x dens
@@ -1119,7 +1167,7 @@ void Fire(void)
     fire.heat[y] += getRand() & 0x7f; // intentional overflow
   }
   // Convert heat to LED colors
-  for (i=0; i<LED_CNT; i++)
+  for (i=0; i<led_cnt; i++)
     strip.setPixelColor(i, getPixelHeatColor (fire.heat[i]));
 }
 
@@ -1147,14 +1195,14 @@ void Lava_Load(void)
 
 void Lava_Init(void)
 {
-  uint16_t i;
+  uint16_t i, cnt = led_cnt / 4;
 
   Lava_Load();
   lava.ts = now - lava.del;
 
-  for (i=0; i<LAVASPARKS; i++)
-    lava.sparks[i] = random(LED_CNT);
-  for (i=0; i<LED_CNT; i++)
+  for (i=0; i<cnt; i++)
+    lava.sparks[i] = random(led_cnt);
+  for (i=0; i<led_cnt; i++)
     lava.heat[i] = getRand() >> 8;
   lava.spix = 0;
 }
@@ -1162,7 +1210,7 @@ void Lava_Init(void)
 void Lava(void)
 {
   uint32_t temp = 0;
-  uint16_t i;
+  uint16_t i, cnt = led_cnt / 4;
 
   // update parameters
   if (re_param == 0x11 || wifi_param & 0x04) { // cooling
@@ -1185,7 +1233,7 @@ void Lava(void)
   lava.ts = now;
 
   // Cool down every cell a little
-  for (i=0; i<LED_CNT; i++) {
+  for (i=0; i<led_cnt; i++) {
     uint8_t cooldown = getRandRange(col);
     if (cooldown > lava.heat[i]) lava.heat[i]=0;
     else lava.heat[i] = lava.heat[i]-cooldown;
@@ -1193,24 +1241,24 @@ void Lava(void)
   }
 
   // check temperature and sparks, when too low, add sparks
-  temp = temp / LED_CNT;
-  if (temp < 100) for (i=0; i<LAVASPARKS; i++) {
+  temp = temp / led_cnt;
+  if (temp < 100) for (i=0; i<cnt; i++) {
     uint16_t t = lava.heat[lava.sparks[i]] + dens;
     lava.heat[lava.sparks[i]] = t>255?255:t;
   }
-  lava.sparks[lava.spix] = random(LED_CNT);
-  lava.spix++; if (lava.spix > LAVASPARKS) lava.spix = 0;
+  lava.sparks[lava.spix] = random(led_cnt);
+  lava.spix++; if (lava.spix > cnt) lava.spix = 0;
 
   // heat from each cell diffuses a little
-  for (i=1; i<LED_CNT-1; i++) {
+  for (i=1; i<led_cnt-1; i++) {
     lava.heat[i] = (lava.heat[i+1] + (lava.heat[i]<<1) + lava.heat[i-1]) >> 2;
   }
   // first and last LED get special treatment, include the first LED from the other side
-  lava.heat[0] = (lava.heat[1] + (lava.heat[0]<<1) + lava.heat[LED_CNT-1]) >> 2;
-  lava.heat[LED_CNT-1] = (lava.heat[0] + (lava.heat[LED_CNT-1]<<1) + lava.heat[LED_CNT-2]) >> 2;
+  lava.heat[0] = (lava.heat[1] + (lava.heat[0]<<1) + lava.heat[led_cnt-1]) >> 2;
+  lava.heat[led_cnt-1] = (lava.heat[0] + (lava.heat[led_cnt-1]<<1) + lava.heat[led_cnt-2]) >> 2;
 
   // Convert heat to LED colors
-  for (i=0; i<LED_CNT; i++)
+  for (i=0; i<led_cnt; i++)
     strip.setPixelColor(i, getPixelHeatColor (lava.heat[i]));
 }
 
@@ -1238,7 +1286,7 @@ uint8_t Lava_Param() {
 // {
 //   uint16_t i;
 //   uint32_t hsv;
-//   for (i=0; i<LED_CNT; i++) {
+//   for (i=0; i<led_cnt; i++) {
 //     switch (col) {
 //       case 0: hsv = 0x000000ff; break;
 //       case 1: hsv = 0x0000ff00; break;
