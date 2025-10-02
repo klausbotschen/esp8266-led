@@ -19,12 +19,12 @@
 #include "entropy.h"
 
 // max value, used only for storage allocation
-#define LED_CNT 800
+#define LED_CNT 100
 // WS2812B consume 24 bit per LED = 3 bytes
 #define LED_BYTES 3
 // 10 LED/m farytail string: RGB
 // 60 LED/m strip: GRB
-#define LED_PIXT NEO_GRB
+#define LED_PIXT NEO_RGB
 #define LED_UDP (LED_CNT*LED_BYTES/4)
 
 #define SPARKS (LED_CNT*64/100)
@@ -102,7 +102,7 @@ struct
   uint8_t bri[NPROG];
 } conf;
 
-#define EE_MAGIC 0x3ecdaffe
+#define EE_MAGIC 0x2ecdaffe
 
 // --------------------------------------------------------
 // every effect needs to store some data from cycle to cycle.
@@ -295,7 +295,8 @@ void handleBinary(uint8_t *rt, uint16_t len) {
     type = 255;
     strip.clear();
     strip.setBrightness(255); // server does all brightness scaling
-    strip.updateType(LED_PIXT+NEO_SPLIT4);
+    split = 2; // set strip config to NEO_SPLIT4
+    strip_config();
   }
   if (len > LED_UDP) len = LED_UDP;
   while (map) {
@@ -336,11 +337,12 @@ void handleIP() {
     Udp.beginPacket("255.255.255.255", localUdpPort+1);
     Udp.write((char*)alivePkt);
     Udp.endPacket();
-    // switch back to last program after timeout
     if (type == 255) {
       inacnt++;
+      // switch back to last program after timeout
       if (inacnt >= 3) {
-        strip.updateType(LED_PIXT+NEO_SPLIT2);
+        split = conf.split;
+        strip_config();
         base = now;
         type = conf.type;
         proginit(1);
@@ -356,23 +358,20 @@ void handleIP() {
 void strip_config(void) {
   uint16_t led_type = 0;
 
-  conf.slen = slen;
-  conf.srgb = srgb;
-  conf.split = split;
   switch (slen) {
     case 0: led_cnt = 100; break;
     case 1: led_cnt = 120; break;
     case 2: led_cnt = 181; break;
     case 3: led_cnt = 200; break;
   }
-  switch (split) {
-    case 0: led_type = NEO_NOSPLIT; break;
-    case 1: led_type = NEO_SPLIT2; led_cnt *= 2; break;
-    case 2: led_type = NEO_SPLIT4; led_cnt *= 4; break;
-  }
   switch (srgb) {
-    case 0: led_type &= NEO_RBG; break;
-    case 1: led_type &= NEO_GRB; break;
+    case 0: led_type = NEO_RGB; break;
+    case 1: led_type = NEO_GRB; break;
+  }
+  switch (split) {
+    case 0: led_type |= NEO_NOSPLIT; break;
+    case 1: led_type |= NEO_SPLIT2; led_cnt *= 2; break;
+    case 2: led_type |= NEO_SPLIT4; led_cnt *= 4; break;
   }
   strip.updateType(led_type);
   strip.updateLength(led_cnt);
@@ -426,9 +425,9 @@ void setup() {
   {
     conf.magic = EE_MAGIC;
     conf.len = sizeof(conf);
-    conf.slen = 2; // 0=100, 1=120, 2=181, 3=200
+    conf.slen = 0; // 0=100, 1=120, 2=181, 3=200
     conf.srgb = 0; // 0=RGB for string, 1=GRB for strip
-    conf.split = 1; // 0=NOSPLIT, 1=SPLIT2, 2=SPLIT4
+    conf.split = 0; // 0=NOSPLIT, 1=SPLIT2, 2=SPLIT4
     conf.scol = 0;
     conf.sacc = 4;
     conf.ccs = 0; // duco color subtype
@@ -459,6 +458,11 @@ void setup() {
   base = millis();
 }
 
+void paramcol() {
+  // color wheel for parameter values
+  altstCol = state.ColorHSV (65536/(re_max+1) * (*re_val_ptr));
+}
+
 // select a new parameter
 void paramsel(uint8_t p) {
   re_selector = p;
@@ -487,8 +491,7 @@ void paramsel(uint8_t p) {
       case 1: re_val_ptr = &srgb; re_max = 1; stateCol = 0x0000ff00; break;
       case 2: re_val_ptr = &split; re_max = 2; stateCol = 0x00ff00ff; break;
     }
-    // color wheel for 2nd level parameter values
-    altstCol = state.ColorHSV (65536/(re_max+1) * (*re_val_ptr));
+    paramcol();
     break;
   }
   interrupts();
@@ -584,6 +587,10 @@ void loop() {
     proginit(!wifi_param); // don't load parameters if from wifi
   }
   else if ((re_param & 0xf0) == 0x20) { // anything in level 2: update strip
+    conf.slen = slen;
+    conf.srgb = srgb;
+    conf.split = split;
+    paramcol();
     strip_config();
   }
   else if (re_param || wifi_param & 0x02) { // any other parameter
@@ -606,6 +613,7 @@ void loop() {
   }
   // user interface: blink status LED when has been changed and is written to EEPROM
   uint32_t sc = stateCol;
+  // alt color is shown blinking, alternatively to the parameter color
   if (altstCol && ((now & 0x03ff) < 850)) sc = altstCol;
   if (conf_dirty) {
     d = now - conf_tim;
@@ -715,8 +723,8 @@ void Star_Set(uint16_t i)
 
 void Stars_DispCol(uint8_t col)
 {
-  if (col == 0) altstCol = 0xffffff;
-  else if (col == 1) altstCol =  0x0f0f0f;
+  if (col == 0) altstCol = 0xffffff; // white: random all colors
+  else if (col == 1) altstCol =  0x0f0f0f; // dark grey: color wheel walk
   else altstCol = state.ColorHSV (((uint16_t)(col-2)) << 12);
 }
 
