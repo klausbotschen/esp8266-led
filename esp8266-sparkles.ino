@@ -19,7 +19,7 @@
 #include "entropy.h"
 
 // max value, used only for storage allocation
-#define LED_CNT 100
+#define LED_CNT 800
 // WS2812B consume 24 bit per LED = 3 bytes
 #define LED_BYTES 3
 // 10 LED/m farytail string: RGB
@@ -381,13 +381,7 @@ void strip_config(void) {
 // called once at startup
 
 void setup() {
-  // system_set_os_print(0);
-  // Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
-  // Serial.setDebugOutput(false);
-  // Serial1.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
-  // Serial1.setDebugOutput(false);
-  // WiFi.setSleepMode(WIFI_NONE_SLEEP);
-  WiFi.begin(ssid, password);
+  // WiFi.begin(ssid, password);
   server.on("/", HTTP_GET, handleRoot);
   server.on("/set", HTTP_POST, handlePost);
   server.begin();
@@ -396,9 +390,6 @@ void setup() {
   *alivePkt = 0;
   *recPkt = 0;
   inacnt = 0;
-
-  // WiFi.mode(WIFI_OFF);
-  // WiFi.forceSleepBegin();
 
   pinMode(D8, OUTPUT);
   pinMode(D1, OUTPUT);
@@ -592,6 +583,7 @@ void loop() {
     conf.split = split;
     paramcol();
     strip_config();
+    proginit(1);
   }
   else if (re_param || wifi_param & 0x02) { // any other parameter
     // just in case update brightness, all other parameter are handled in realtime
@@ -1012,11 +1004,21 @@ uint8_t Duco_Param() {
 // sprites have color, position and speed (col, pos 0..65535, v)
 // yet unused: delta v (dv)
 // configuration: density, speed, brightness
-// density defines size of start ramp
+// density defines the size of start ramp - a new sprite is born
+// when the startup ramp has been left be the previous sprite.
+
+uint16_t actdens;
+
 
 // 1..16 => 4 .. 254
 uint16_t sprites_speed(uint8_t s) {
   float td = 9.094 * exp (0.277 * (s+1));
+  return td;
+}
+
+// 0..15 => 2 .. 32
+uint16_t sprites_density(uint8_t s) {
+  float td = 2.0 * exp (0.185 * s);
   return td;
 }
 
@@ -1026,10 +1028,11 @@ void Sprites_Load(void)
   dens = conf.stype;
 }
 
-// initially just set some random sprites, ignore density setting for now
+// initially just set some random sprites
 void Sprites_Init(void)
 {
-  uint16_t i, h, n = led_cnt/9;
+  actdens = sprites_density(dens);
+  uint16_t i, h, n = led_cnt/(actdens+3);
   sprites.iter = 0;
   memset (&sprites, 0, sizeof (sprites_t));
   // speed spread 
@@ -1047,14 +1050,16 @@ void Sprites_Init(void)
 
 void Sprites(void)
 {
-  uint16_t i, cnt = led_cnt / 3, h, ramp=500*(9-dens);
+  uint16_t i, cnt = led_cnt / 3, h, ramp;
   uint8_t coll=0; // 1 when a sprite is in the start ramp
 
   // update parameters
   if (re_param == 0x11 || wifi_param & 0x10) { // density
-    if (dens > 8) dens = 8;
+    if (dens > 15) dens = 15;
     conf.stype = dens;
+    actdens = sprites_density(dens);
   }
+  ramp=500*actdens;
   if (re_param == 0x12 || wifi_param & 0x08) { // acceleration
     if (del > 15) del = 15;
     conf.speed = del;
@@ -1072,14 +1077,14 @@ void Sprites(void)
   {
     if (!sprites.v[i]) continue;
     uint16_t pp = sprites.pos[i];
-    uint16_t pn = pp + sprites.v[i];
+    uint16_t pn = pp + sprites.v[i]; // next position
     if (pn < pp) {  // overflow => end point reached
       sprites.v[i] = 0;
       continue;
     }
     if (pn < ramp) coll = 1; // check if start ramp is free
     sprites.pos[i] = pn; // move to next position
-    uint32_t t = sprites.pos[i] * led_cnt;
+    uint32_t t = pn * led_cnt;
     uint8_t ci = (t >> 9) & 0x7f; // half wave
     uint8_t c1 = 64 + ci; // starting at peak
     uint8_t c2 = 192 + ci; // starting at valley
@@ -1103,7 +1108,7 @@ void Sprites(void)
 
 uint8_t Sprites_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &dens; re_max = 8; stateCol = 0x000000ff; break;
+      case 1: re_val_ptr = &dens; re_max = 15; stateCol = 0x000000ff; break;
       case 2: re_val_ptr = &del; re_max = 15; stateCol = 0x0000ff00; break;
       case 3: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
