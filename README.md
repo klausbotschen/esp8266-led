@@ -12,6 +12,9 @@ Introduction to the ESP8266 specific library functionalities:
 
 https://arduino-esp8266.readthedocs.io/
 
+Neopixel Uberguide - everything about LED programming
+
+https://cdn-learn.adafruit.com/downloads/pdf/adafruit-neopixel-uberguide.pdf
 
 One issue that arises is to map from linear input values to exponential output values, like the brightness in values from 0..15 to 4..254. The calculation can be performed with the following spreadsheet:
 
@@ -52,6 +55,11 @@ All LED data is stored in a single array with __LED_CNT__ lenght, and is written
 * _NOSPLIT_: the full length is written to all 4 pins, which means the strips have identical data.
 * _SPLIT2_: the first half of the array is written to pins 1 and 3, the seconed half is reversed in order and written to pins 2 and 4. This results in having the full array on the strings with the controller in the middle.
 * _SPLIT4_: the array is cut in 4, and each segment is written to one pin.
+
+Color is either caclulated with RGB encoding, or HSV encoding (which is the color wheel):
+
+![HSV Color Wheel](https://github.com/klausbotschen/esp8266-led/blob/main/doc/leds_hsv-diagram-phillip_burges.png)
+
 
 ### Effects
 
