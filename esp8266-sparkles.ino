@@ -770,7 +770,7 @@ void Stars(void)
     //hsv = strip.gamma32(hsv);
     strip.setPixelColor(p, hsv);
   }
-  sparks.hue += 16; // slowly walk the color wheel, 41 seconds the round
+  sparks.hue += 16; // slowly walk the color wheel, 136 seconds the round
   // parameter update
   if (re_param == 0x11 || wifi_param & 0x04) { // color wheel
     if (col > 17) col = 17;
@@ -808,9 +808,9 @@ uint16_t getNewPos()
 
 uint8_t Stars_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &col; re_max = 17; stateCol = 0x000000ff; Stars_DispCol(col); break;
+      case 1: re_val_ptr = &col; re_max = 17; stateCol = 0x00ff00ff; Stars_DispCol(col); break;
       case 2: re_val_ptr = &del; re_max = 8; stateCol = 0x0000ff00; break;
-      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x00ff00ff; break;
+      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x000000ff; break;
       case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
@@ -990,7 +990,7 @@ void Duco()
 
 uint8_t Duco_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &col; re_max = 3; stateCol = 0x000000ff; break;
+      case 1: re_val_ptr = &col; re_max = 3; stateCol = 0x00ff00ff; break;
       case 2: re_val_ptr = &del; re_max = 16; stateCol = 0x0000ff00; break;
       case 3: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
