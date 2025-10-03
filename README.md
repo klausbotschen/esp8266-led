@@ -35,44 +35,65 @@ Arduino programs are called a "sketch" which consists (at the bare minimum) of t
 
 The sketch provides a set of LED effects with their parameters, it handles the rotary controller input to change parameters, maintains a clock with 1 minute granularity (one tick every 60 seconds), and processes data packets that have been received via WiFI.
 
+### Effects
+
+Following effects can be selected using the rotary wheel, where the color shown
+
+* Sparkling stars:
+* Candle light chain
+* Color Flip
+* Sprites: Moving dots, instantiate in one end, and vanish at the other
+* Fire
+* Lava
+
 ## User Interface
 
-Status LED color depicts which parameter is currently affected by the rotary encoder:
-
-* white: select effect
-* red: select brightness
-* green: select speed
-* blue: select density
+The user interface consists of the rotary encoder and a status LED.
 
 Rotary Encoder:
 
-* single push: switch to next parameter
+* rotate changes the value of the selected parameter,
+* single short push: switch to next parameter,
+* long push (> 1 sec): switch to next level; yellow for level 2, violet for level 1.
+
+Changed values are made persistent after 20 seconds. To rise awareness, after 10 seconds the status LED will start flashing white, and after another 10 seconds, a one second white flash signals that the values are now persistent. Changing parameter values will reset the 20 seconds timer. This is done because the EEPROM has a limited number of cycles (usually around 10.000).
+
+Status LED color depicts which parameter is currently affected by the rotary encoder. For level 1, these are:
+
+* white: effect
+* red: brightness
+* green: speed
+* blue: density (dampening for fire/lava)
+* violet: heat (lava), spark area size (fire), color (stars, duco)
+
+For "sparkling stars", violet allows to select the color range. To visualize the current selection, the current color is shown for 2/3 seconds, and violet is shown for 1/3 second. For the color range, following choices are available:
+
+* white: new sparkling stars are selected from the full spectrum.
+* 15 colors out of the color wheel: The selected color is used as center, and colors are selected from a narrow range around this color.
+* dark grey: the center color is gradually walking through the color wheel in 136 seconds.
+
+For "Color Fliw", violet provides currently 4 color selections:
+
+* 1: blue-yellow-red-green
+* 2: two levels of magenta/violett
+* 3: a continous color morphing between 1 and 2
+* 4: toggle between red, blue <=> yellow, green
+
+In level 2, the parameters concern the strip/string configuration, here, the parameter value is shown in discrete colors (1/3 parameter, 2/3 value):
+
+* blue: LED strip channel length. red: 100, green: 120, turqouise: 181 (3m LED strip), violet: 200.
+* green: LED type, red: RGB (strings), turquoise: GRB (strip).
+* violet: channel splitting,
+  * red: no split, the full length of the array is written to all 4 channels in parallel.
+  * green: 2-split, the first half of the array is written to pins A and C, the seconed half is reversed in order and written to pins B and D, in effect A+B are one long strip and identical to C+D. The effect is streched out to two segments.
+  * blue: 4-split, the array is cut in 4, and each segment is written to one pin, therefore each channel is fully separated.
 
 ### LED output control
-
-All LED data is stored in a single array with __LED_CNT__ lenght, and is written to 4 pins a the same time. This array can be split up (with a parameter at creation of the strip):
-
-* _NOSPLIT_: the full length is written to all 4 pins, which means the strips have identical data.
-* _SPLIT2_: the first half of the array is written to pins 1 and 3, the seconed half is reversed in order and written to pins 2 and 4. This results in having the full array on the strings with the controller in the middle.
-* _SPLIT4_: the array is cut in 4, and each segment is written to one pin.
 
 Color is either caclulated with RGB encoding, or HSV encoding (which is the color wheel):
 
 ![HSV Color Wheel](https://github.com/klausbotschen/esp8266-led/blob/main/doc/leds_hsv-diagram-phillip_burges.png)
 
-
-### Effects
-
-Following effects can be selected using the rotary wheel, where the color shown
-
-* Sparkling stars with following parameters:
-  * Color wheel center: select a color, or "black" which moves through the wheel in 80 seconds.
-  * Speed
-  * Density
-  * Brightness
-* Candle light chain
-* Dual Color Flip
-* Sprites: Moving dots, instantiate in one end, and vanish at the other
 
 ## Details
 
