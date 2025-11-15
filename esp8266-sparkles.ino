@@ -59,13 +59,21 @@ void Stars_Load(void);
 void Stars_DispCol(void);
 uint8_t Stars_Param(void);
 void Stars(void);
+
 void Candle_Init(void);
 uint8_t Candle_Param(void);
 void Candles(void);
+
 void Duco_Init(void);
 void Duco_Load(void);
 uint8_t Duco_Param(void);
 void Duco(void);
+
+void Rainbow_Init(void);
+void Rainbow_Load(void);
+uint8_t Rainbow_Param(void);
+void Rainbow(void);
+
 void Sprites_Init(void);
 void Sprites_Load(void);
 uint8_t Sprites_Param(void);
@@ -86,7 +94,7 @@ void loadParam(void);
 // ######################################################################
 
 // number of effects
-#define NPROG 6
+#define NPROG 7
 
 // this datastructure is stored in the EEPROM
 // and holds all necessary config entries for all effects.
@@ -96,13 +104,14 @@ struct
   uint16_t len; // size of this struct
   uint8_t slen, srgb, split; // configuration of the LED strip/string
   // effect configurations
-  uint8_t type, scol, sacc, ccs, cdel, speed, stype, density;
+  uint8_t type, scol, sacc, ccs, cdel, cdens, speed, stype, density;
   uint8_t sparks, cooling, flicker;
   uint8_t lavacool, heat, lavaspeed;
+  uint8_t rbspeed, rbspread;
   uint8_t bri[NPROG];
 } conf;
 
-#define EE_MAGIC 0x2ecdaffe
+#define EE_MAGIC 0x1ecdaffe
 
 // --------------------------------------------------------
 // every effect needs to store some data from cycle to cycle.
@@ -130,9 +139,15 @@ typedef struct
 {
   uint16_t ts, gts, del; // timestamp, gradient, and calculated delay
   uint16_t off;     // starting offset
+  uint8_t walk, twin;
   uint16_t val[MAX_COL];
   float grad[MAX_COL];
 } colors_t;
+
+typedef struct
+{
+  uint16_t off, stsz;         // color offset, timestamp and step size
+} rainbow_t;
 
 typedef struct
 {
@@ -166,6 +181,7 @@ static union
   sprites_t sprites;
   fire_t fire;
   lava_t lava;
+  rainbow_t rainbow;
 };
 
 // ######################################################################
@@ -423,10 +439,11 @@ void setup() {
     conf.sacc = 4;
     conf.ccs = 0; // duco color subtype
     conf.cdel = 4; // duco delay
+    conf.cdens = 0; // duco delay spread
     for (d=0; d<NPROG; d++) conf.bri[d] = 3;
     conf.type = 3;
     conf.speed = 4; // sprite speed
-    conf.stype = 5; // sprite density
+    conf.stype = 3; // sprite density
     conf.density = 15;
     conf.cooling = 5;
     conf.sparks = 3;
@@ -434,6 +451,8 @@ void setup() {
     conf.lavacool = 3;
     conf.heat = 6;
     conf.lavaspeed = 7;
+    conf.rbspeed = 3;
+    conf.rbspread = 0;
     conf.ctrid = 0x00008421;
   }
   type = conf.type;
@@ -469,6 +488,7 @@ void paramsel(uint8_t p) {
       case 3: re_selector = Sprites_Param(); break;
       case 4: re_selector = Fire_Param(); break;
       case 5: re_selector = Lava_Param(); break;
+      case 6: re_selector = Rainbow_Param(); break;
     }
     if (re_selector == 0) { // no parameter => select prog type
       stateCol = 0x003f3f3f; // dim wite
@@ -501,10 +521,12 @@ void loadParam()
   strip.setBrightness(convertBrightness());
   switch (type) {
     case 0: Stars_Load(); break;
+    case 1: break;
     case 2: Duco_Load(); break;
     case 3: Sprites_Load(); break;
     case 4: Fire_Load(); break;
     case 5: Lava_Load(); break;
+    case 6: Rainbow_Load(); break;
   }
 }
 
@@ -518,6 +540,7 @@ void proginit(uint8_t load)
     case 3: Sprites_Init(); break;
     case 4: Fire_Init(); break;
     case 5: Lava_Init(); break;
+    case 6: Rainbow_Init(); break;
   }
 }
 
@@ -600,6 +623,7 @@ void loop() {
       case 3: Sprites(); break;
       case 4: Fire(); break;
       case 5: Lava(); break;
+      case 6: Rainbow(); break;
     }
     strip.show();
   }
@@ -906,17 +930,26 @@ uint8_t Candle_Param() {
 // => 51.82 = 17 A + 257 B
 // A = 0.8546 => a = 7.155
 // B = 0.1451 => b = 0.334
+
 // del: 0 = stop, 1..16 => 16..1
+// 1 ... 16 => 10 ... 1500
 uint16_t Duco_Delay(void) {
   conf.cdel = del;
   float td = 7.155 * exp (0.334 * (17-del));
   return td;
 }
 
+// the gradient is used to walk through the color wheel,
+// but always the long way, never through 0.
+// would be a future improvement to select the path.
 float getGradient(int32_t a, int32_t b) {
   return (float)(b-a)/20000;
 }
 
+// set new colors and calculate a gradient with the previous color
+// for each of the MAX_COL colors.
+// the current implementation uses a fixed number of parameters
+// whereas it should be MAX_COL... future improvement.
 void Duco_Set(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
   uint8_t i = 0;
   colors.grad[i] = getGradient(a, colors.val[i]);
@@ -927,14 +960,22 @@ void Duco_Set(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
   colors.val[i++] = c;
   colors.grad[i] = getGradient(d, colors.val[i]);
   colors.val[i++] = d;
+  colors.walk = 0;
+  colors.twin = 0;
 }
 
+#define DUCO_MAX 8
 void Duco_Select(uint8_t i) {
   switch (i) {
     case 0: Duco_Set (0, 10923, 41000, 21845 ); break; // red, yellow, light blue, green (shift)
     case 1: Duco_Set (45000, 56000, 62000, 50000); break; // magenta/violett (shift)
-    case 2: Duco_Select(0); Duco_Select(1); colors.gts = now; break; // shift and color morphing between 0/1
-    case 3: Duco_Set (0, 43690, 10923, 21845 ); break; // toggle red, blue <=> yellow, green
+    case 2: Duco_Set (6000, 10923, 14000, 20000); break; // orange-green (shift)
+    case 3: Duco_Set (23000, 29000, 34000, 40000); break; // green-turquiose (shift)
+    case 4: Duco_Set (65500, 58000, 53000, 48000); break; // red-violet-blue (shift)
+    case 5: Duco_Set (0, 43690, 10923, 21845 ); colors.twin = 1; break; // toggle red, blue <=> yellow, green
+    case 6: Duco_Select(0); Duco_Select(1); colors.gts = now; colors.walk = 1; break; // shift and color morphing between 0/1
+    case 7: Duco_Select(2); Duco_Select(3); colors.gts = now; colors.walk = 1; break; // shift and color morphing between 0/1
+    case 8: Duco_Select(3); Duco_Select(4); colors.gts = now; colors.walk = 1; break; // shift and color morphing between 0/1
   }
 }
 
@@ -942,6 +983,7 @@ void Duco_Load()
 {
   col = conf.ccs;
   del = conf.cdel;
+  dens = conf.cdens;
 }
 
 void Duco_Init()
@@ -955,33 +997,37 @@ void Duco_Init()
 
 void Duco()
 {
-  uint16_t i, c = colors.off;
+  uint16_t v, i, c = colors.off;
   uint16_t d = now - colors.ts;
   uint16_t gd = now - colors.gts;
   if (gd >= 40000) colors.gts += 40000, gd -= 40000;
   if (gd > 20000) gd = 40000 - gd;
   // update parameters
-  if (re_param == 0x11 || wifi_param & 0x04) { // color wheel
-    if (col > 3) col = 3;
+  if (re_param == 0x11 || wifi_param & 0x04) { // color selection
+    if (col > DUCO_MAX) col = DUCO_MAX;
     conf.ccs = col; Duco_Select(col);
   }
   if (re_param == 0x12 || wifi_param & 0x08) { // speed, 0=stop, 1..16
     if (del > 16) del = 16;
     colors.del = Duco_Delay();
   }
+  if (re_param == 0x13 || wifi_param & 0x10) { // speed variation
+    if (dens > 7) dens = 7;
+    conf.cdens = dens;
+  }
   if (del && d >= colors.del) {   // update was triggered timeout
     colors.ts = now;
-    colors.off++;
+    colors.off++; // advance offset
     if (colors.off == MAX_COL) colors.off = 0;
   }
   for (i=0; i<led_cnt; i++) {
-    uint16_t v = colors.val[c];
-    if (col == 2) v += colors.grad[c] * gd; // gradient handling
+    v = colors.val[c];
+    if (colors.walk) v += colors.grad[c] * gd; // gradient handling
     uint32_t hsv = strip.ColorHSV (v);
     strip.setPixelColor(i, hsv);
     c++;
     if (c == MAX_COL) c = 0;
-    if (col == 3) {         // toggle between two sets
+    if (colors.twin) {         // toggle between two sets
       c++;
       if (c == MAX_COL) c = 0;
     }
@@ -990,8 +1036,71 @@ void Duco()
 
 uint8_t Duco_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &col; re_max = 3; stateCol = 0x00ff00ff; break;
+      case 1: re_val_ptr = &col; re_max = DUCO_MAX; stateCol = 0x00ff00ff; break;
       case 2: re_val_ptr = &del; re_max = 16; stateCol = 0x0000ff00; break;
+      case 3: re_val_ptr = &dens; re_max = 7; stateCol = 0x000000ff; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      default: return 0;
+  }
+  return re_selector;
+}
+
+// ######################################################################
+
+// 1 ... 16 => 10 ... 1500, 0=stop
+uint16_t Rainbow_Step(void) {
+  if (del == 0) return 0;
+  float td = 7.155 * exp (0.334 * del);
+  return td;
+}
+
+// 0 ... 41 => 3 ... 240
+float Rainbow_Spread(void) {
+  float td = 3.0 * exp (0.128 * dens);
+  return td;
+}
+
+void Rainbow_Load()
+{
+  del = conf.rbspeed;
+  dens = conf.rbspread;
+}
+
+void Rainbow_Init()
+{
+  Rainbow_Load();
+  rainbow.stsz = Rainbow_Step();
+  rainbow.off = 0;
+}
+
+void Rainbow()
+{
+  uint16_t i, v, c = rainbow.off;
+
+  // update parameters
+  if (re_param == 0x11 || wifi_param & 0x08) { // speed, 0=stop, 1..16
+    if (del > 16) del = 16;
+    rainbow.stsz = Rainbow_Step();
+    conf.rbspeed = del;
+  }
+  if (re_param == 0x12 || wifi_param & 0x10) { // color spread factor
+    if (dens > 31) dens = 31;
+    conf.rbspread = dens;
+  }
+  // divide color wheel by led count and density
+  v = 655360.0 / led_cnt / Rainbow_Spread();
+  for (i=0; i<led_cnt; i++) {
+    uint32_t hsv = strip.ColorHSV (c);
+    strip.setPixelColor(i, hsv);
+    c += v; // walk along the color wheel
+  }
+  rainbow.off += rainbow.stsz; // advance offset
+}
+
+uint8_t Rainbow_Param() {
+  switch (re_selector) {
+      case 1: re_val_ptr = &del; re_max = 16; stateCol = 0x0000ff00; break;
+      case 2: re_val_ptr = &dens; re_max = 31; stateCol = 0x000000ff; break;
       case 3: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
