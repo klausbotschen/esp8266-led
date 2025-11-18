@@ -138,10 +138,11 @@ typedef struct
 typedef struct
 {
   uint16_t ts, gts, del; // timestamp, gradient, and calculated delay
-  uint16_t off;     // starting offset
-  uint8_t walk, twin;
+  uint16_t off, speed;     // starting offset
+  uint8_t walk, twin; // twin: toggle 02/13
   uint16_t val[MAX_COL];
   float grad[MAX_COL];
+  uint8_t left[MAX_COL];
 } colors_t;
 
 typedef struct
@@ -369,6 +370,15 @@ void handleIP() {
 }
 
 // ######################################################################
+
+// NEO_NOSPLIT: the full length is written to all 4 pins,
+//     which means the strips have identical data.
+// NEO_SPLIT2: the first half of the array is written to pins 1 and 3,
+//     the seconed half is reversed in order and written to pins 2 and 4.
+//     This results in having the full array on the strings
+//     with the controller in the middle.
+// NEO_SPLIT4: the array is cut into 4 segments,
+//     and each segment is written to a different pin.
 
 // strip/string configuration was updated, re-configure neopixel library
 void strip_config(void) {
@@ -939,11 +949,13 @@ uint16_t Duco_Delay(void) {
   return td;
 }
 
-// the gradient is used to walk through the color wheel,
-// but always the long way, never through 0.
-// would be a future improvement to select the path.
-float getGradient(int32_t a, int32_t b) {
-  return (float)(b-a)/20000;
+// the gradient is used to walk through the color wheel.
+// a = color to start with, b = color to walk to.
+// left=true: take the left side of the color wheel
+float getGradient(int32_t a, int32_t b, uint8_t left) {
+  int32_t d = b-a;
+  if (left) d = (d > 0) ? -(65526-d) : 65536+d;
+  return (float)d/colors.speed;
 }
 
 // set new colors and calculate a gradient with the previous color
@@ -952,30 +964,47 @@ float getGradient(int32_t a, int32_t b) {
 // whereas it should be MAX_COL... future improvement.
 void Duco_Set(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
   uint8_t i = 0;
-  colors.grad[i] = getGradient(a, colors.val[i]);
+  colors.grad[i] = getGradient(a, colors.val[i], colors.left[i]);
+  colors.left[i] = false;
   colors.val[i++] = a;
-  colors.grad[i] = getGradient(b, colors.val[i]);
+  colors.grad[i] = getGradient(b, colors.val[i], colors.left[i]);
+  colors.left[i] = false;
   colors.val[i++] = b;
-  colors.grad[i] = getGradient(c, colors.val[i]);
+  colors.grad[i] = getGradient(c, colors.val[i], colors.left[i]);
+  colors.left[i] = false;
   colors.val[i++] = c;
-  colors.grad[i] = getGradient(d, colors.val[i]);
+  colors.grad[i] = getGradient(d, colors.val[i], colors.left[i]);
+  colors.left[i] = false;
   colors.val[i++] = d;
   colors.walk = 0;
   colors.twin = 0;
 }
 
-#define DUCO_MAX 8
+void Duco_DirSet(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+  uint8_t i = 0;
+  colors.left[i++] = a;
+  colors.left[i++] = b;
+  colors.left[i++] = c;
+  colors.left[i++] = d;
+}
+
+#define DUCO_MAX 9
 void Duco_Select(uint8_t i) {
   switch (i) {
     case 0: Duco_Set (0, 10923, 41000, 21845 ); break; // red, yellow, light blue, green (shift)
     case 1: Duco_Set (45000, 56000, 62000, 50000); break; // magenta/violett (shift)
-    case 2: Duco_Set (6000, 10923, 14000, 20000); break; // orange-green (shift)
-    case 3: Duco_Set (23000, 29000, 34000, 40000); break; // green-turquiose (shift)
-    case 4: Duco_Set (65500, 58000, 53000, 48000); break; // red-violet-blue (shift)
+    case 2: Duco_Set (3000, 8000, 14000, 21845); break; // orange-green (shift)
+    case 3: Duco_Set (23000, 29000, 37000, 43000); break; // green-turquiose (shift)
+    case 4: Duco_Set (52000, 45000, 65500, 60000); break; // red-violet-blue (shift)
     case 5: Duco_Set (0, 43690, 10923, 21845 ); colors.twin = 1; break; // toggle red, blue <=> yellow, green
-    case 6: Duco_Select(0); Duco_Select(1); colors.gts = now; colors.walk = 1; break; // shift and color morphing between 0/1
-    case 7: Duco_Select(2); Duco_Select(3); colors.gts = now; colors.walk = 1; break; // shift and color morphing between 0/1
-    case 8: Duco_Select(3); Duco_Select(4); colors.gts = now; colors.walk = 1; break; // shift and color morphing between 0/1
+    case 6: Duco_Select(0); Duco_Select(1); colors.gts = now; colors.walk = 1; break; // shift and color morphing
+    case 7: Duco_Select(2); Duco_Select(3); colors.gts = now; colors.walk = 1; break; // shift and color morphing
+    case 8: Duco_Select(2); Duco_Select(4); colors.gts = now; colors.walk = 1; break; // shift and color morphing
+    case 9: Duco_Set (54613, 21845, 32768, 43690);
+            Duco_DirSet (true, false, false, true);
+            Duco_Set (10923, 43690, 54613, 0);
+            colors.gts = now; colors.walk = 1;
+            break;
   }
 }
 
@@ -999,9 +1028,9 @@ void Duco()
 {
   uint16_t v, i, c = colors.off;
   uint16_t d = now - colors.ts;
-  uint16_t gd = now - colors.gts;
-  if (gd >= 40000) colors.gts += 40000, gd -= 40000;
-  if (gd > 20000) gd = 40000 - gd;
+  uint16_t gd = now - colors.gts, gul = colors.speed*2;
+  if (gd >= gul) colors.gts += gul, gd -= gul;
+  if (gd > colors.speed) gd = gul - gd;
   // update parameters
   if (re_param == 0x11 || wifi_param & 0x04) { // color selection
     if (col > DUCO_MAX) col = DUCO_MAX;
@@ -1012,8 +1041,18 @@ void Duco()
     colors.del = Duco_Delay();
   }
   if (re_param == 0x13 || wifi_param & 0x10) { // speed variation
-    if (dens > 7) dens = 7;
+    if (dens > 5) dens = 5;
     conf.cdens = dens;
+    switch (dens) {
+      case 0: colors.speed = 3000; break;
+      case 1: colors.speed = 6000; break;
+      case 2: colors.speed = 10000; break;
+      case 3: colors.speed = 16000; break;
+      case 4: colors.speed = 24000; break;
+      case 5: colors.speed = 32000; break;
+    }
+    gd = 0;
+    Duco_Select(col);
   }
   if (del && d >= colors.del) {   // update was triggered timeout
     colors.ts = now;
@@ -1022,7 +1061,7 @@ void Duco()
   }
   for (i=0; i<led_cnt; i++) {
     v = colors.val[c];
-    if (colors.walk) v += colors.grad[c] * gd; // gradient handling
+    if (colors.walk) v += (uint16_t)(colors.grad[c] * gd); // gradient handling
     uint32_t hsv = strip.ColorHSV (v);
     strip.setPixelColor(i, hsv);
     c++;
@@ -1038,7 +1077,7 @@ uint8_t Duco_Param() {
   switch (re_selector) {
       case 1: re_val_ptr = &col; re_max = DUCO_MAX; stateCol = 0x00ff00ff; break;
       case 2: re_val_ptr = &del; re_max = 16; stateCol = 0x0000ff00; break;
-      case 3: re_val_ptr = &dens; re_max = 7; stateCol = 0x000000ff; break;
+      case 3: re_val_ptr = &dens; re_max = 5; stateCol = 0x000000ff; break;
       case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
       default: return 0;
   }
