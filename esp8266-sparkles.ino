@@ -980,6 +980,17 @@ void Duco_Set(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
   colors.twin = 0;
 }
 
+void Duco_DensSet() {
+  switch (dens) {
+    case 0: colors.speed = 3000; break;
+    case 1: colors.speed = 6000; break;
+    case 2: colors.speed = 10000; break;
+    case 3: colors.speed = 16000; break;
+    case 4: colors.speed = 24000; break;
+    case 5: colors.speed = 32000; break; // max value as *2 needs to be < 65k
+  }
+}
+
 void Duco_DirSet(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   uint8_t i = 0;
   colors.left[i++] = a;
@@ -1013,6 +1024,7 @@ void Duco_Load()
   col = conf.ccs;
   del = conf.cdel;
   dens = conf.cdens;
+  Duco_DensSet();
 }
 
 void Duco_Init()
@@ -1028,9 +1040,10 @@ void Duco()
 {
   uint16_t v, i, c = colors.off;
   uint16_t d = now - colors.ts;
+  // calculate the position on the gradient depending on time and speed
   uint16_t gd = now - colors.gts, gul = colors.speed*2;
-  if (gd >= gul) colors.gts += gul, gd -= gul;
-  if (gd > colors.speed) gd = gul - gd;
+  if (gd >= gul) colors.gts += gul, gd -= gul; // reached limit, new circle
+  else if (gd > colors.speed) gd = gul - gd; // in the second half we walk back
   // update parameters
   if (re_param == 0x11 || wifi_param & 0x04) { // color selection
     if (col > DUCO_MAX) col = DUCO_MAX;
@@ -1043,15 +1056,8 @@ void Duco()
   if (re_param == 0x13 || wifi_param & 0x10) { // speed variation
     if (dens > 5) dens = 5;
     conf.cdens = dens;
-    switch (dens) {
-      case 0: colors.speed = 3000; break;
-      case 1: colors.speed = 6000; break;
-      case 2: colors.speed = 10000; break;
-      case 3: colors.speed = 16000; break;
-      case 4: colors.speed = 24000; break;
-      case 5: colors.speed = 32000; break;
-    }
-    gd = 0;
+    gd = 0; // restart from beginning
+    Duco_DensSet();
     Duco_Select(col);
   }
   if (del && d >= colors.del) {   // update was triggered timeout
