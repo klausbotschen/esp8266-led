@@ -35,24 +35,32 @@
 // time in ms for each iteration => ca 30 fps
 #define STEP 33
 
-//const char* ssid = "A1-7DB236D1";
-//const char* password = "ZrinqYrPZ19CR8";
-//const char* ssid = "katzenwildbahn";
-const char* ssid = "klausb";
-const char* password = "buskatze";
-//const char* ssid = "kanaan";
-//const char* password = "welcome2home";
-
-
 // D8 = GPIO15
 Adafruit_NeoPixel state = Adafruit_NeoPixel (1, D8, NEO_GRBW);
+#define STAT_RED 0x00ff0000
+#define STAT_VIOLET 0x00ff00ff
+#define STAT_DIM_VIOLET 0x007f007f
+#define STAT_DIM_YELLOW 0x007f7f00
+#define STAT_GREEN 0x0000ff00
+#define STAT_BLUE 0x000000ff
+#define STAT_DIM_WHITE 0x003f3f3f
+
 // NEO_NOSPLIT: the full length is written to all 4 pins, which means the strips have identical data.
 // NEO_SPLIT2: the first half of the array is written to pins 1 and 3, the seconed half is reversed in order
 //      and written to pins 2 and 4. This results in having the full array on the strings with the controller in the middle.
 // NEO_SPLIT4: the array is cut into 4 segments, and each segment is written to one pin.
 // D3 => 16, D2 => 4, D1 => 5, D7 => 13
 Adafruit_NeoPixel strip = Adafruit_NeoPixel (LED_CNT, D3, D2, D1, D7, LED_PIXT+NEO_NOSPLIT);
-// note, _D3_ = GPIO0 oszillates after boot for ~50ms and has a similar effect after receiving a UDP packet. Whatever.
+// note, _D3_ = GPIO0 is affected by debug output from:
+// Arduino/Arduino/cores/esp8266/IPAddress.cpp
+// Arduino/Arduino/cores/esp8266/Print.cpp
+// Arduino/Arduino/cores/esp8266/debug.h
+// Arduino/Arduino/libraries/ESP8266HTTPClient/src/ESP8266HTTPClient.h
+// Arduino/Arduino/libraries/ESP8266WebServer/src/ESP8266WebServer.h
+// Arduino/Arduino/libraries/ESP8266WiFi/src/ESP8266WiFi.cpp
+// Arduino/Arduino/libraries/ESP8266WiFi/src/ESP8266WiFi.h
+// Arduino/Arduino/libraries/ESP8266WiFi/src/ESP8266WiFiGeneric.h
+// Arduino/Arduino/libraries/ESP8266WiFi/src/WiFiUdp.cpp
 
 void Stars_Init(void);
 void Stars_Load(void);
@@ -102,7 +110,7 @@ struct
 {
   uint32_t magic, ctrid; // controller ID
   uint16_t len; // size of this struct
-  uint8_t slen, srgb, split; // configuration of the LED strip/string
+  uint8_t wifi, slen, srgb, split; // configuration of WiFi and LED strip/string
   // effect configurations
   uint8_t type, scol, sacc, ccs, cdel, cdens, speed, stype, density;
   uint8_t sparks, cooling, flicker;
@@ -111,7 +119,7 @@ struct
   uint8_t bri[NPROG];
 } conf;
 
-#define EE_MAGIC 0x1ecdaffe
+#define EE_MAGIC 0x1eddaffe
 
 // --------------------------------------------------------
 // every effect needs to store some data from cycle to cycle.
@@ -189,27 +197,32 @@ static union
 
 uint16_t base, now, conf_tim, alive_tim, d, led_cnt;
 uint8_t conf_dirty, inacnt;
-uint32_t stateCol, altstCol=0;
+uint32_t stateCol, altstCol=0, lead_ts;
 
 void paramsel(uint8_t);
 void proginit(uint8_t load);
 void rdclock(void);
 
 // variables that are set in interrupt handling (rotary encoder)
-volatile uint8_t type=0, col=0, bri=3, del=0, dens=0, slen=0, srgb=0, split=0;
+volatile uint8_t type=0, col=0, bri=3, del=0, dens=0, slen=0, srgb=0, split=0, wifimode=0;
 volatile uint8_t re_max, *re_val_ptr, re_flag=0; // re_flag: flag for change
-uint8_t wifi_param, re_param, re_debounce=0, re_selector=0;  // re_selector: parameter, re_param set to re_selector when re_flag=1
+uint8_t re_param, re_debounce=0, re_selector=0;  // re_selector: parameter, re_param set to re_selector when re_flag=1
 uint8_t re_click=0; // switch request, 1..click, 2..long click
 uint8_t re_level = 1; // UI parameter level, 1..effects, 2..settings
-uint16_t reqts; // switch pressed
+uint16_t reqts, wifi_param; // ts of switch press
 void re_read(void);
 
 // ######################################################################
 
+IPAddress local_IP(192,168,100,1);
+IPAddress gateway(192,168,100,1);
+IPAddress subnet(255,255,255,0);
+IPAddress bcast(192,168,100,255);
+
 ESP8266WebServer server(80);
-WiFiUDP Udp;
+WiFiUDP udp_endpoint;
 IPAddress peer; // send alive packet only to peer!
-#define localUdpPort 5700
+#define UDP_PORT 5700
 uint8_t recPkt[1472], alivePkt[128];
 
 // HTML Page
@@ -232,16 +245,54 @@ const char htmlPage[] PROGMEM = R"rawliteral(
     <h2>bussicat-led</h2>
     <input type="text" id="textInput" placeholder="p0c0s5dFb4">
     <button onclick="sendData()">Send</button>
-    <br/><p>Programs and parameters color, speed, density, brightness:
-    <br>p0: Stars c [0..H: 0=full,1=wheel,2..H:red-green-blue] s [0..8] d [0..F] b [0..F]
+    <br/><p>Programs and parameters c=color, s=speed, d=density, b=brightness:
+    <br>p0: Stars c [0..H: 0=full,1=slow wheel,2..H:red-green-blue] s [0..8] d [0..F] b [0..F]
     <br>p1: Candles b [0..F]
-    <br>p2: Duco c [0..3, 2=morphing 0~1] s [0..G, 0=stop] b [0..F]
-    <br>p3: Sprits s [0..F] d [0..8] b [0..F]
-    <br>i<abcd1234>: 8 digit hex id
+    <br>p2: Duco c [0..5, 6-9=morphing] s [0=stop, 1..G] d [0..5] b [0..F]
+    <br>p3: Sprites s [0..F] d [0..F] b [0..F]
+    <br>p4: Fire c [0..F] s [0..F] d [0..F] b [0..F]
+    <br>p5: Lava c [0..F] s [0..F] d [0..F] b [0..F]
+    <br>p6: Rainbow s [0=stop, 1..F] d [0..O] b [0..F]
+    <br>i<abcd1234>: 4 digit hex id + 4 digit strip mapping
+    <br>L: Strip length, 0=100, 1=120, 2=181, 3=200
+    <br>O: Order, 0=RGB, 1=GRB
+    <br>X: Split, 0=A=B=C=D, 1=A-B+C-D, 2=ABCD
+    <br>W: Wifi, 0=off, 1=klausb, 2=leo, 3=follow, 4=lead
     </p>
 </body>
 </html>
 )rawliteral";
+
+enum WiFiMode {
+  WIFI_OFF,
+  WIFI_KLAUS,
+  WIFI_LEO,
+  WIFI_FOLLOW,
+  WIFI_LEAD
+}
+#define WIFI_MAX_PARM WIFI_LEAD
+void wifi_config(uint8_t wm) {
+  WiFi.disconnect(true);  // first reset
+  server.stop();
+  udp_endpoint.stop();
+  switch (wm) {
+    case WIFI_OFF: break;
+    case WIFI_KLAUS: WiFi.begin("klausb", "buskatze"); break;
+    case WIFI_LEO: WiFi.begin("kanaan", "welcome2home"); break;
+    case WIFI_FOLLOW: WiFi.begin("katzenwildbahn", "buskatze"); break;
+    case WIFI_LEAD:
+    // ssid, psk, channel, hidden, max_connection
+    WiFi.softAP("katzenwildbahn", "buskatze", 1, false, 8);
+    WiFi.softAPConfig(local_IP, gateway, subnet);
+    break;
+  }
+  if (wm) {
+    server.begin(80);
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/set", HTTP_POST, handlePost);
+    udp_endpoint.begin(wm==3 ? UDP_PORT+1 : UDP_PORT);  // bind to port
+  }
+}
 
 // callback for the webserver getting a request for the root page
 void handleRoot() {
@@ -252,7 +303,7 @@ void handleRoot() {
 // input is a string with letters followed by a single HEX digit,
 // e.g. p0c0s5dFb4
 void handleCommand(uint8_t *rt, uint16_t len) {
-  uint32_t ctrid=0;
+  uint32_t hexval=0;
   uint16_t i=0, cmd=0, cval=0;
   uint8_t idc=0;
   for (i=0; i < len; i++) {
@@ -264,18 +315,44 @@ void handleCommand(uint8_t *rt, uint16_t len) {
       else if (cval >= 'A') cval -= 'A'-10;
       else cval -= '0';
       switch (cmd) {
-        case 'p': wifi_param|=0x01; cmd = 0; type = cval; loadParam(); break;
-        case 'b': wifi_param|=0x02; cmd = 0; bri = cval; break;
-        case 'c': wifi_param|=0x04; cmd = 0; col = cval; break;
-        case 's': wifi_param|=0x08; cmd = 0; del = cval; break;
-        case 'd': wifi_param|=0x10; cmd = 0; dens = cval; break;
+        case 'p': cmd=0; if (cval != type) { wifi_param|=0x001; type = cval; loadParam(); } break;
+        case 'b': cmd=0; if (cval != bri) { wifi_param|=0x002; bri = cval; } break;
+        case 'c': cmd=0; if (cval != col) { wifi_param|=0x004; col = cval; } break;
+        case 's': cmd=0; if (cval != del) { wifi_param|=0x008; del = cval; } break;
+        case 'd': cmd=0; if (cval != dens) { wifi_param|=0x010; dens = cval; } break;
         // receive a new 8 HEX digit board ID
-        case 'i': wifi_param|=0x11;
-        ctrid <<= 4; ctrid += cval; idc++;
-        if (idc >= 8) { conf.ctrid=ctrid; idc=0; cmd=0; *alivePkt=0; }
+        case 'i': wifi_param|=0x020;
+        hexval <<= 4; hexval += cval; idc++;
+        if (idc >= 8) { conf.ctrid=hexval; idc=0; cmd=0; *alivePkt=0; }
         break;
+        // receive a new 8 HEX digit timestamp
+        case 't': wifi_param|=0x040;
+        hexval <<= 4; hexval += cval; idc++;
+        if (idc >= 8) { lead_ts=hexval; hexval=0; idc=0; cmd=0; }
+        break;
+        case 'L': cmd=0; if (cval != slen) { wifi_param|=0x080; slen = cval; } break;
+        case 'O': cmd=0; if (cval != srgb) { wifi_param|=0x080; srgb = cval; } break;
+        case 'X': cmd=0; if (cval != split) { wifi_param|=0x080; split = cval; } break;
+        case 'W': cmd=0; if (cval != wifimode) { wifi_param|=0x100; wifimode = cval; } break;
       }
     }
+  }
+}
+
+// 0..9, A..Z
+char as_exthex(uint8_t v) {
+  if (v < 10) return '0'+v;
+  else return 55+v; // 'A'+v-10
+}
+
+// always broadcast the full configuration to peer nodes
+void share_config() {
+  if (wifimode == WIFI_LEAD) {
+    snprintf((char*)recPkt, sizeof(recPkt), "cp%xb%xc%cs%cd%xt%08x",
+      type, bri, as_exthex(col), as_exthex(del), as_exthex(dens), millis());
+    udp_endpoint.beginPacket(bcast, UDP_PORT+1);
+    udp_endpoint.write((char*)recPkt);
+    udp_endpoint.endPacket();
   }
 }
 
@@ -308,21 +385,21 @@ void handleBinary(uint8_t *rt, uint16_t len) {
   uint8_t frame = *rt++;
   uint8_t *pix = strip.getPixels();
   len--;
-  if (type != 255) {
+  if (type != 255) { // first UDP packet => reconfigure strip
     type = 255;
     strip.clear();
     strip.setBrightness(255); // server does all brightness scaling
     split = 2; // set strip config to NEO_SPLIT4
     strip_config();
   }
-  if (len > LED_UDP) len = LED_UDP;
+  if (len > led_cnt) len = led_cnt;
   while (map) {
     if (map & cmd & 0x0f) memcpy (pix, rt, len);
-    pix += LED_UDP;
+    pix += led_cnt;
     map >>= 4;
   }
-  if (cmd & 0x10) {
-    alive_tim = now;  // alive! data has been received
+  if (cmd & 0x10) {   // bit 's' is set => show 
+    alive_tim = now;  // update alive flag, data has been received
     strip.show();
   }
 }
@@ -333,27 +410,33 @@ void handleBinary(uint8_t *rt, uint16_t len) {
 // we check if the data stream is still alive, if not, switch back
 // to the last program, and send out broadcast packets with our ID.
 void handleIP() {
-  int packetSize = Udp.parsePacket();
+  int packetSize = udp_endpoint.parsePacket();
   if (packetSize) {
-    packetSize = Udp.read(recPkt, sizeof(recPkt));
+    packetSize = udp_endpoint.read(recPkt, sizeof(recPkt));
     if (packetSize) switch (recPkt[0]) {
         case 'c': handleCommand(recPkt+1, packetSize-1); break;
         case 's': handleSync(recPkt+1, packetSize-1); break;
-        case 'a': break;
+        case 'a': break; // alive packets are meant for the server
         default: handleBinary(recPkt, packetSize);
     }
-    peer = Udp.remoteIP();
+    peer = udp_endpoint.remoteIP();
   }
   server.handleClient();
   d = now - alive_tim;
-  if (d > 2000) {
+  if (d > 1000 && wifimode == WIFI_LEAD) {
+    share_config();  // send out config and timestamp every second
+    alive_tim = now;
+  }
+  else if (d > 2000 && wifimode<WIFI_FOLLOW) {
+    // the "alive" packet is broadcasted to port +1 and shares the controller ID,
+    // the server then can collect controller IDs and corresponding IP addresses
     if (!*alivePkt) {
       snprintf((char*)alivePkt, sizeof(alivePkt), "a%08x", conf.ctrid);
     }
     alive_tim = now;
-    Udp.beginPacket("255.255.255.255", localUdpPort+1);
-    Udp.write((char*)alivePkt);
-    Udp.endPacket();
+    udp_endpoint.beginPacket("255.255.255.255", UDP_PORT+1);
+    udp_endpoint.write((char*)alivePkt);
+    udp_endpoint.endPacket();
     if (type == 255) {
       inacnt++;
       // switch back to last program after timeout
@@ -403,15 +486,9 @@ void strip_config(void) {
   strip.updateLength(led_cnt);
 }
 
-
 // called once at startup
 
 void setup() {
-  // WiFi.begin(ssid, password);
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/set", HTTP_POST, handlePost);
-  server.begin();
-  Udp.begin(localUdpPort);
   alive_tim = 0;
   *alivePkt = 0;
   *recPkt = 0;
@@ -442,19 +519,20 @@ void setup() {
   {
     conf.magic = EE_MAGIC;
     conf.len = sizeof(conf);
+    conf.wifi = 0;
     conf.slen = 0; // 0=100, 1=120, 2=181, 3=200
     conf.srgb = 0; // 0=RGB for string, 1=GRB for strip
     conf.split = 0; // 0=NOSPLIT, 1=SPLIT2, 2=SPLIT4
-    conf.scol = 0;
-    conf.sacc = 4;
+    conf.type = 3; // effect
+    conf.scol = 0; // stars color
+    conf.sacc = 4; // stars acceleration
+    conf.density = 15; // stars density
     conf.ccs = 0; // duco color subtype
     conf.cdel = 4; // duco delay
     conf.cdens = 0; // duco delay spread
     for (d=0; d<NPROG; d++) conf.bri[d] = 3;
-    conf.type = 3;
     conf.speed = 4; // sprite speed
     conf.stype = 3; // sprite density
-    conf.density = 15;
     conf.cooling = 5;
     conf.sparks = 3;
     conf.flicker = 6;
@@ -469,7 +547,9 @@ void setup() {
   slen = conf.slen;
   srgb = conf.srgb;
   split = conf.split;
+  wifimode = conf.wifi;
   strip_config();
+  wifi_config(wifimode);
   paramsel(0);
   proginit(1);
   // rotary encoder uses interrupts
@@ -501,16 +581,17 @@ void paramsel(uint8_t p) {
       case 6: re_selector = Rainbow_Param(); break;
     }
     if (re_selector == 0) { // no parameter => select prog type
-      stateCol = 0x003f3f3f; // dim wite
+      stateCol = STAT_DIM_WHITE; // dim wite
       re_val_ptr = &type; re_max = NPROG-1; // select the effect
     }
     break;
     case 2: // set string/strip config
-    if (re_selector > 2) re_selector = 0;
+    if (re_selector > 3) re_selector = 0;
     switch (re_selector) {
-      case 0: re_val_ptr = &slen; re_max = 3; stateCol = 0x000000ff; break;
-      case 1: re_val_ptr = &srgb; re_max = 1; stateCol = 0x0000ff00; break;
-      case 2: re_val_ptr = &split; re_max = 2; stateCol = 0x00ff00ff; break;
+      case 0: re_val_ptr = &slen; re_max = 3; stateCol = STAT_BLUE; break;
+      case 1: re_val_ptr = &srgb; re_max = 1; stateCol = STAT_GREEN; break;
+      case 2: re_val_ptr = &split; re_max = 2; stateCol = STAT_VIOLET; break;
+      case 3: re_val_ptr = &wifimode; re_max = WIFI_MAX_PARM; stateCol = STAT_RED; break;
     }
     paramcol();
     break;
@@ -573,8 +654,8 @@ void loop() {
     // long press over 1 second => switch to other level
     if (d > 1000) {
       switch (re_level) {
-        case 1: stateCol = 0x007f7f00; break;
-        case 2: stateCol = 0x007f007f; break;
+        case 1: stateCol = STAT_DIM_YELLOW; break;
+        case 2: stateCol = STAT_DIM_VIOLET; break;
       }
       altstCol = 0;
       re_selector = 0;
@@ -593,7 +674,7 @@ void loop() {
   }
   // check wifi
   wifi_param = 0; // wifi_param holds which parameters have been set via WiFi
-  if (WiFi.status() == WL_CONNECTED) handleIP();
+  if (WiFi.status() == WL_CONNECTED || wifimode==WIFI_LEAD) handleIP();  // STA connected?
   re_param = 0; // assume nothing changed, disable interrupts to sync flag handling
   // disable interrupt while we check rotary encoder values
   noInterrupts();
@@ -606,11 +687,17 @@ void loop() {
   re_flag = 0; // clear flag
   interrupts();
   // #### re_param = which parameter was changed ####
+  if (re_param & 0x10) share_config();
   if (re_param == 0x10 || wifi_param & 0x01) {   // new program type
     if (type != 255) conf.type = type;
     proginit(!wifi_param); // don't load parameters if from wifi
   }
-  else if ((re_param & 0xf0) == 0x20) { // anything in level 2: update strip
+  if (re_param == 0x23 || wifi_param & 0x100) { // wifi mode
+    conf.wifi = wifimode;
+    paramcol();
+    wifi_config(wifimode);
+  }
+  if ((re_param & 0xf0) == 0x20 || wifi_param & 0x80) { // configure strip, see handleCommand
     conf.slen = slen;
     conf.srgb = srgb;
     conf.split = split;
@@ -618,9 +705,9 @@ void loop() {
     strip_config();
     proginit(1);
   }
-  else if (re_param || wifi_param & 0x02) { // any other parameter
-    // just in case update brightness, all other parameter are handled in realtime
-    conf.bri[type] = bri;
+  if (re_param || wifi_param & 0x02) { // any other parameter
+    // just in case update brightness, all other parameter are handled in their effect context
+    if (type < NPROG) conf.bri[type] = bri;
     strip.setBrightness(convertBrightness());
   }
   // #### LED strip calculations except when type = 255, udp to pixel ####
@@ -842,10 +929,10 @@ uint16_t getNewPos()
 
 uint8_t Stars_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &col; re_max = 17; stateCol = 0x00ff00ff; Stars_DispCol(col); break;
-      case 2: re_val_ptr = &del; re_max = 8; stateCol = 0x0000ff00; break;
-      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x000000ff; break;
-      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      case 1: re_val_ptr = &col; re_max = 17; stateCol = STAT_VIOLET; Stars_DispCol(col); break;
+      case 2: re_val_ptr = &del; re_max = 8; stateCol = STAT_GREEN; break;
+      case 3: re_val_ptr = &dens; re_max = 15; stateCol = STAT_BLUE; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
       default: return 0;
   }
   return re_selector;
@@ -920,7 +1007,7 @@ uint32_t getPixelHeatColor (uint16_t temperature)
 
 uint8_t Candle_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      case 1: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
       default: return 0;
   }
   return re_selector;
@@ -1081,10 +1168,10 @@ void Duco()
 
 uint8_t Duco_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &col; re_max = DUCO_MAX; stateCol = 0x00ff00ff; break;
-      case 2: re_val_ptr = &del; re_max = 16; stateCol = 0x0000ff00; break;
-      case 3: re_val_ptr = &dens; re_max = 5; stateCol = 0x000000ff; break;
-      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      case 1: re_val_ptr = &col; re_max = DUCO_MAX; stateCol = STAT_VIOLET; break;
+      case 2: re_val_ptr = &del; re_max = 16; stateCol = STAT_GREEN; break;
+      case 3: re_val_ptr = &dens; re_max = 5; stateCol = STAT_BLUE; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
       default: return 0;
   }
   return re_selector;
@@ -1144,9 +1231,9 @@ void Rainbow()
 
 uint8_t Rainbow_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &del; re_max = 16; stateCol = 0x0000ff00; break;
-      case 2: re_val_ptr = &dens; re_max = 31; stateCol = 0x000000ff; break;
-      case 3: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      case 1: re_val_ptr = &del; re_max = 16; stateCol = STAT_GREEN; break;
+      case 2: re_val_ptr = &dens; re_max = 31; stateCol = STAT_BLUE; break;
+      case 3: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
       default: return 0;
   }
   return re_selector;
@@ -1262,9 +1349,9 @@ void Sprites(void)
 
 uint8_t Sprites_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &dens; re_max = 15; stateCol = 0x000000ff; break;
-      case 2: re_val_ptr = &del; re_max = 15; stateCol = 0x0000ff00; break;
-      case 3: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      case 1: re_val_ptr = &dens; re_max = 15; stateCol = STAT_BLUE; break;
+      case 2: re_val_ptr = &del; re_max = 15; stateCol = STAT_GREEN; break;
+      case 3: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
       default: return 0;
   }
   return re_selector;
@@ -1340,10 +1427,10 @@ void Fire(void)
 
 uint8_t Fire_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &col; re_max = 15; stateCol = 0x000000ff; break;
-      case 2: re_val_ptr = &del; re_max = 15; stateCol = 0x0000ff00; break;
-      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x00ff00ff; break;
-      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      case 1: re_val_ptr = &col; re_max = 15; stateCol = STAT_BLUE; break;
+      case 2: re_val_ptr = &del; re_max = 15; stateCol = STAT_GREEN; break;
+      case 3: re_val_ptr = &dens; re_max = 15; stateCol = STAT_VIOLET; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
       default: return 0;
   }
   return re_selector;
@@ -1431,10 +1518,10 @@ void Lava(void)
 
 uint8_t Lava_Param() {
   switch (re_selector) {
-      case 1: re_val_ptr = &col; re_max = 15; stateCol = 0x000000ff; break;
-      case 2: re_val_ptr = &del; re_max = 15; stateCol = 0x0000ff00; break;
-      case 3: re_val_ptr = &dens; re_max = 15; stateCol = 0x00ff00ff; break;
-      case 4: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+      case 1: re_val_ptr = &col; re_max = 15; stateCol = STAT_BLUE; break;
+      case 2: re_val_ptr = &del; re_max = 15; stateCol = STAT_GREEN; break;
+      case 3: re_val_ptr = &dens; re_max = 15; stateCol = STAT_VIOLET; break;
+      case 4: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
       default: return 0;
   }
   return re_selector;
@@ -1455,9 +1542,9 @@ uint8_t Lava_Param() {
 //   uint32_t hsv;
 //   for (i=0; i<led_cnt; i++) {
 //     switch (col) {
-//       case 0: hsv = 0x000000ff; break;
-//       case 1: hsv = 0x0000ff00; break;
-//       case 2: hsv = 0x00ff0000; break;
+//       case 0: hsv = STAT_BLUE; break;
+//       case 1: hsv = STAT_GREEN; break;
+//       case 2: hsv = STAT_RED; break;
 //       case 3: hsv = 0x00ffffff; break;
 //     }
 //     strip.setPixelColor(i, hsv);
@@ -1466,8 +1553,8 @@ uint8_t Lava_Param() {
 
 // uint8_t Test_Param() {
 //   switch (re_selector) {
-//       case 1: re_val_ptr = &col; re_max = 3; stateCol = 0x000000ff; break;
-//       case 2: re_val_ptr = &bri; re_max = 15; stateCol = 0x00ff0000; break;
+//       case 1: re_val_ptr = &col; re_max = 3; stateCol = STAT_BLUE; break;
+//       case 2: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
 //       default: return 0;
 //   }
 //   return re_selector;
