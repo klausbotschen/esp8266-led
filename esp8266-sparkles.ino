@@ -11,10 +11,11 @@
   
 */
 
-#include <WiFiUdp.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
+
+#include "WrapUDP.h"
 #include "Adafruit_NeoPixel.h"
 #include "entropy.h"
 
@@ -197,7 +198,7 @@ static union
 
 uint16_t base, now, conf_tim, alive_tim, d, led_cnt;
 uint8_t conf_dirty, inacnt;
-uint32_t stateCol, altstCol=0, lead_ts;
+uint32_t stateCol, altstCol=0;
 
 void paramsel(uint8_t);
 void proginit(uint8_t load);
@@ -209,8 +210,11 @@ volatile uint8_t re_max, *re_val_ptr, re_flag=0; // re_flag: flag for change
 uint8_t re_param, re_debounce=0, re_selector=0;  // re_selector: parameter, re_param set to re_selector when re_flag=1
 uint8_t re_click=0; // switch request, 1..click, 2..long click
 uint8_t re_level = 1; // UI parameter level, 1..effects, 2..settings
-uint16_t reqts, wifi_param; // ts of switch press
+uint16_t reqts; // ts of switch press
+uint16_t wifi_param; // bitmap which parameters have been set from UDP/TCP packets
 void re_read(void);
+// cyclic parameters
+uint16_t sparks_hue, colors_ts, colors_gts, colors_off;
 
 // ######################################################################
 
@@ -218,12 +222,16 @@ IPAddress local_IP(192,168,100,1);
 IPAddress gateway(192,168,100,1);
 IPAddress subnet(255,255,255,0);
 IPAddress bcast(192,168,100,255);
+IPAddress act_bcast;
 
 ESP8266WebServer server(80);
-WiFiUDP udp_endpoint;
-IPAddress peer; // send alive packet only to peer!
+WrapUDP udp_endpoint;
 #define UDP_PORT 5700
-uint8_t recPkt[1472], alivePkt[128];
+#define ALIVE_PKT_LEN 128
+
+uint16_t ts_rec, ts_prev=0, ts_diff=0, ts_hist=0, tsa[8], tscnt=0;
+
+void handleUDP(pbuf *pb);
 
 // HTML Page
 const char htmlPage[] PROGMEM = R"rawliteral(
@@ -263,20 +271,20 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-enum WiFiMode {
-  WIFI_OFF,
+enum WiFiModes {
+  WIFI_NONE,
   WIFI_KLAUS,
   WIFI_LEO,
   WIFI_FOLLOW,
   WIFI_LEAD
-}
+};
 #define WIFI_MAX_PARM WIFI_LEAD
 void wifi_config(uint8_t wm) {
   WiFi.disconnect(true);  // first reset
   server.stop();
-  udp_endpoint.stop();
+  udp_endpoint.close();
   switch (wm) {
-    case WIFI_OFF: break;
+    case WIFI_NONE: break;
     case WIFI_KLAUS: WiFi.begin("klausb", "buskatze"); break;
     case WIFI_LEO: WiFi.begin("kanaan", "welcome2home"); break;
     case WIFI_FOLLOW: WiFi.begin("katzenwildbahn", "buskatze"); break;
@@ -284,14 +292,19 @@ void wifi_config(uint8_t wm) {
     // ssid, psk, channel, hidden, max_connection
     WiFi.softAP("katzenwildbahn", "buskatze", 1, false, 8);
     WiFi.softAPConfig(local_IP, gateway, subnet);
+    // bcast = WiFi.softAPbroadcastIP();
     break;
   }
+  if (wm == WIFI_LEAD) act_bcast = bcast;
+  else act_bcast = WiFi.broadcastIP();
   if (wm) {
     server.begin(80);
     server.on("/", HTTP_GET, handleRoot);
     server.on("/set", HTTP_POST, handlePost);
-    udp_endpoint.begin(wm==3 ? UDP_PORT+1 : UDP_PORT);  // bind to port
+    udp_endpoint.listen(wm==WIFI_FOLLOW ? UDP_PORT+1 : UDP_PORT);  // bind to port
   }
+  udp_endpoint.onPacket(handleUDP);
+  wifi_param = 0; // wifi_param bitmap holds which parameters have been set via WiFi
 }
 
 // callback for the webserver getting a request for the root page
@@ -323,18 +336,39 @@ void handleCommand(uint8_t *rt, uint16_t len) {
         // receive a new 8 HEX digit board ID
         case 'i': wifi_param|=0x020;
         hexval <<= 4; hexval += cval; idc++;
-        if (idc >= 8) { conf.ctrid=hexval; idc=0; cmd=0; *alivePkt=0; }
+        if (idc >= 8) { conf.ctrid=hexval; idc=0; cmd=0; }
         break;
-        // receive a new 8 HEX digit timestamp
+        // receive a new 4 HEX digit delta timestamp
         case 't': wifi_param|=0x040;
         hexval <<= 4; hexval += cval; idc++;
-        if (idc >= 8) { lead_ts=hexval; hexval=0; idc=0; cmd=0; }
+        if (idc >= 4) { ts_rec=hexval; hexval=0; idc=0; cmd=0; }
         break;
+        case 'h':
+        hexval <<= 4; hexval += cval; idc++;
+        if (idc >= 4) { sparks_hue=hexval; hexval=0; idc=0; cmd=0; }
+        break;
+        case 'e':
+        hexval <<= 4; hexval += cval; idc++;
+        if (idc >= 4) { colors_ts=hexval; hexval=0; idc=0; cmd=0; }
+        break;
+        case 'g':
+        hexval <<= 4; hexval += cval; idc++;
+        if (idc >= 4) { colors_gts=hexval; hexval=0; idc=0; cmd=0; }
+        break;
+        case 'o': cmd=0; colors_off = cval; break;
         case 'L': cmd=0; if (cval != slen) { wifi_param|=0x080; slen = cval; } break;
         case 'O': cmd=0; if (cval != srgb) { wifi_param|=0x080; srgb = cval; } break;
         case 'X': cmd=0; if (cval != split) { wifi_param|=0x080; split = cval; } break;
         case 'W': cmd=0; if (cval != wifimode) { wifi_param|=0x100; wifimode = cval; } break;
       }
+    }
+  }
+  if (wifi_param & 0x040) {
+    ts_diff = ts_rec - now;
+    tsa[tscnt++] = (ts_rec - ts_prev) - (now - ts_hist);
+    ts_prev = ts_rec;
+    if (tscnt >= 8) {
+      tscnt = 0;
     }
   }
 }
@@ -347,13 +381,24 @@ char as_exthex(uint8_t v) {
 
 // always broadcast the full configuration to peer nodes
 void share_config() {
-  if (wifimode == WIFI_LEAD) {
-    snprintf((char*)recPkt, sizeof(recPkt), "cp%xb%xc%cs%cd%xt%08x",
-      type, bri, as_exthex(col), as_exthex(del), as_exthex(dens), millis());
-    udp_endpoint.beginPacket(bcast, UDP_PORT+1);
-    udp_endpoint.write((char*)recPkt);
-    udp_endpoint.endPacket();
+  pbuf* alivePkt = pbuf_alloc(PBUF_TRANSPORT, ALIVE_PKT_LEN, PBUF_RAM);
+  uint8_t * pktptr = (uint8_t*)(alivePkt->payload);
+  uint16_t wlen = snprintf((char*)pktptr, ALIVE_PKT_LEN, "cp%xb%xc%cs%cd%xt%04x",
+      type, bri, as_exthex(col), as_exthex(del), as_exthex(dens), now);
+  switch (type) {
+    case 0: // sparks
+    wlen += snprintf((char*)pktptr+wlen, ALIVE_PKT_LEN-wlen,
+              "h%04x", sparks.hue);
+    break;
+    case 2: // duco
+    wlen += snprintf((char*)pktptr+wlen, ALIVE_PKT_LEN-wlen,
+              "e%04xg%04xo%x", colors.ts, colors.gts, colors.off);
+    break;
   }
+  alivePkt->len = wlen;
+  alivePkt->tot_len = wlen;
+  udp_endpoint.writeTo(alivePkt, act_bcast, UDP_PORT+1);
+  pbuf_free(alivePkt);
 }
 
 // web browser sending back an AJAX post message with commands
@@ -404,23 +449,23 @@ void handleBinary(uint8_t *rt, uint16_t len) {
   }
 }
 
+// directly process the pbuf we got from udp_recv callback
+void handleUDP(pbuf *pb) {
+  uint8_t * recPkt = (uint8_t*)(pb->payload);
+  switch (recPkt[0]) {
+      case 'c': handleCommand(recPkt+1, pb->len-1); break;
+      case 's': handleSync(recPkt+1, pb->len-1); break;
+      case 'a': break; // ignore, alive packets are meant for the server
+      default: handleBinary(recPkt, pb->len);
+  }
+}
+
 // called at every loop cycle when WiFi is connected:
-// process received UDP packets and HTTP server requests
+// process HTTP server requests
 // when UDP LED packets have been received,
 // we check if the data stream is still alive, if not, switch back
 // to the last program, and send out broadcast packets with our ID.
 void handleIP() {
-  int packetSize = udp_endpoint.parsePacket();
-  if (packetSize) {
-    packetSize = udp_endpoint.read(recPkt, sizeof(recPkt));
-    if (packetSize) switch (recPkt[0]) {
-        case 'c': handleCommand(recPkt+1, packetSize-1); break;
-        case 's': handleSync(recPkt+1, packetSize-1); break;
-        case 'a': break; // alive packets are meant for the server
-        default: handleBinary(recPkt, packetSize);
-    }
-    peer = udp_endpoint.remoteIP();
-  }
   server.handleClient();
   d = now - alive_tim;
   if (d > 1000 && wifimode == WIFI_LEAD) {
@@ -430,13 +475,14 @@ void handleIP() {
   else if (d > 2000 && wifimode<WIFI_FOLLOW) {
     // the "alive" packet is broadcasted to port +1 and shares the controller ID,
     // the server then can collect controller IDs and corresponding IP addresses
-    if (!*alivePkt) {
-      snprintf((char*)alivePkt, sizeof(alivePkt), "a%08x", conf.ctrid);
-    }
+    pbuf* alivePkt = pbuf_alloc(PBUF_TRANSPORT, ALIVE_PKT_LEN, PBUF_RAM);
+    uint8_t * pktptr = (uint8_t*)(alivePkt->payload);
+    uint16_t wlen = snprintf((char*)pktptr, ALIVE_PKT_LEN, "a%08x", conf.ctrid);
+    alivePkt->len = wlen;
+    alivePkt->tot_len = wlen;
+    udp_endpoint.writeTo(alivePkt, act_bcast, UDP_PORT+1);
+    pbuf_free(alivePkt);
     alive_tim = now;
-    udp_endpoint.beginPacket("255.255.255.255", UDP_PORT+1);
-    udp_endpoint.write((char*)alivePkt);
-    udp_endpoint.endPacket();
     if (type == 255) {
       inacnt++;
       // switch back to last program after timeout
@@ -490,9 +536,8 @@ void strip_config(void) {
 
 void setup() {
   alive_tim = 0;
-  *alivePkt = 0;
-  *recPkt = 0;
   inacnt = 0;
+  memset(tsa, 0, sizeof(tsa));
 
   pinMode(D8, OUTPUT);
   pinMode(D1, OUTPUT);
@@ -552,10 +597,13 @@ void setup() {
   wifi_config(wifimode);
   paramsel(0);
   proginit(1);
+  wifi_param = 0;
+  re_param = 0;
   // rotary encoder uses interrupts
   attachInterrupt (D5, re_read, CHANGE);
   attachInterrupt (D6, re_read, CHANGE);
   base = millis();
+  ts_rec = base & 0x0000ffff;
 }
 
 void paramcol() {
@@ -643,6 +691,7 @@ void proginit(uint8_t load)
 // - handle UI and time steps
 
 void loop() {
+  ts_hist = now;
   now = millis();
   // rotary encoder button: switch between parameters type specific
   // bit shift and add over some time to debounce
@@ -673,9 +722,7 @@ void loop() {
     re_click = 0;
   }
   // check wifi
-  wifi_param = 0; // wifi_param holds which parameters have been set via WiFi
   if (WiFi.status() == WL_CONNECTED || wifimode==WIFI_LEAD) handleIP();  // STA connected?
-  re_param = 0; // assume nothing changed, disable interrupts to sync flag handling
   // disable interrupt while we check rotary encoder values
   noInterrupts();
   if (re_flag || wifi_param) {
@@ -687,7 +734,7 @@ void loop() {
   re_flag = 0; // clear flag
   interrupts();
   // #### re_param = which parameter was changed ####
-  if (re_param & 0x10) share_config();
+  if (re_param & 0x10 && wifimode == WIFI_LEAD) share_config();
   if (re_param == 0x10 || wifi_param & 0x01) {   // new program type
     if (type != 255) conf.type = type;
     proginit(!wifi_param); // don't load parameters if from wifi
@@ -710,7 +757,7 @@ void loop() {
     if (type < NPROG) conf.bri[type] = bri;
     strip.setBrightness(convertBrightness());
   }
-  // #### LED strip calculations except when type = 255, udp to pixel ####
+// #### LED strip calculations except when type = 255, udp to pixel ####
   if (type != 255) {
     // finally we actually run our effect programs:
     switch (type) {
@@ -724,6 +771,8 @@ void loop() {
     }
     strip.show();
   }
+  wifi_param = 0; // WiFi params processed
+  re_param = 0;
   // user interface: blink status LED when has been changed and is written to EEPROM
   uint32_t sc = stateCol;
   // alt color is shown blinking, alternatively to the parameter color
@@ -868,6 +917,9 @@ void Stars_Init(void)
     }
   }
   strip.clear();
+  if (wifi_param & 0x040) {
+    sparks.hue = sparks_hue;
+  }
 }
 
 void Stars(void)
@@ -1095,15 +1147,17 @@ void Duco_Select(uint8_t i) {
     case 3: Duco_Set (23000, 29000, 37000, 43000); break; // green-turquiose (shift)
     case 4: Duco_Set (52000, 45000, 65500, 60000); break; // red-violet-blue (shift)
     case 5: Duco_Set (0, 43690, 10923, 21845 ); colors.twin = 1; break; // toggle red, blue <=> yellow, green
-    case 6: Duco_Select(0); Duco_Select(1); colors.gts = now; colors.walk = 1; break; // shift and color morphing
-    case 7: Duco_Select(2); Duco_Select(3); colors.gts = now; colors.walk = 1; break; // shift and color morphing
-    case 8: Duco_Select(2); Duco_Select(4); colors.gts = now; colors.walk = 1; break; // shift and color morphing
+    case 6: Duco_Select(0); Duco_Select(1); colors.walk = 1; break; // shift and color morphing
+    case 7: Duco_Select(2); Duco_Select(3); colors.walk = 1; break; // shift and color morphing
+    case 8: Duco_Select(2); Duco_Select(4); colors.walk = 1; break; // shift and color morphing
     case 9: Duco_Set (54613, 21845, 32768, 43690);
             Duco_DirSet (true, false, false, true);
             Duco_Set (10923, 43690, 54613, 0);
-            colors.gts = now; colors.walk = 1;
+            colors.walk = 1;
             break;
   }
+  // when time sync received, use colors_gts
+  colors.gts = (wifi_param & 0x040) ? colors_gts : now;
 }
 
 void Duco_Load()
@@ -1121,20 +1175,20 @@ void Duco_Init()
   colors.ts = now - colors.del;
   colors.off = 0;
   Duco_Select(col);
+  if (wifi_param & 0x040) {
+    colors.ts = colors_ts;
+    colors.off = colors_off;
+  }
 }
 
 void Duco()
 {
   uint16_t v, i, c = colors.off;
-  uint16_t d = now - colors.ts;
-  // calculate the position on the gradient depending on time and speed
-  uint16_t gd = now - colors.gts, gul = colors.speed*2;
-  if (gd >= gul) colors.gts += gul, gd -= gul; // reached limit, new circle
-  else if (gd > colors.speed) gd = gul - gd; // in the second half we walk back
   // update parameters
   if (re_param == 0x11 || wifi_param & 0x04) { // color selection
     if (col > DUCO_MAX) col = DUCO_MAX;
-    conf.ccs = col; Duco_Select(col);
+    conf.ccs = col;
+    Duco_Select(col);
   }
   if (re_param == 0x12 || wifi_param & 0x08) { // speed, 0=stop, 1..16
     if (del > 16) del = 16;
@@ -1143,12 +1197,18 @@ void Duco()
   if (re_param == 0x13 || wifi_param & 0x10) { // speed variation
     if (dens > 5) dens = 5;
     conf.cdens = dens;
-    gd = 0; // restart from beginning
+    colors.gts = now;
     Duco_DensSet();
     Duco_Select(col);
   }
+  // calculate the position on the gradient depending on time and speed
+  uint16_t gd = now + ts_diff - colors.gts, gul = colors.speed*2;
+  if (gd >= gul) colors.gts += gul, gd -= gul; // reached limit, new circle
+  else if (gd > colors.speed) gd = gul - gd; // in the second half we walk back
+
+  uint16_t d = now + ts_diff - colors.ts;
   if (del && d >= colors.del) {   // update was triggered timeout
-    colors.ts = now;
+    colors.ts = now + ts_diff;
     colors.off++; // advance offset
     if (colors.off == MAX_COL) colors.off = 0;
   }
