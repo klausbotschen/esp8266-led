@@ -328,7 +328,7 @@ void handleCommand(uint8_t *rt, uint16_t len) {
       else if (cval >= 'A') cval -= 'A'-10;
       else cval -= '0';
       switch (cmd) {
-        case 'p': cmd=0; if (cval != type) { wifi_param|=0x001; type = cval; loadParam(); } break;
+        case 'p': cmd=0; if (cval != type) { wifi_param|=0x001; type = cval; } break;
         case 'b': cmd=0; if (cval != bri) { wifi_param|=0x002; bri = cval; } break;
         case 'c': cmd=0; if (cval != col) { wifi_param|=0x004; col = cval; } break;
         case 's': cmd=0; if (cval != del) { wifi_param|=0x008; del = cval; } break;
@@ -363,7 +363,7 @@ void handleCommand(uint8_t *rt, uint16_t len) {
       }
     }
   }
-  if (wifi_param & 0x040) {
+  if (wifi_param & 0x040) { // timestamp
     ts_diff = ts_rec - now;
     tsa[tscnt++] = (ts_rec - ts_prev) - (now - ts_hist);
     ts_prev = ts_rec;
@@ -373,17 +373,17 @@ void handleCommand(uint8_t *rt, uint16_t len) {
   }
 }
 
-// 0..9, A..Z
+// 0..9, a..z
 char as_exthex(uint8_t v) {
   if (v < 10) return '0'+v;
-  else return 55+v; // 'A'+v-10
+  else return 87+v; // 'a'+v-10
 }
 
 // always broadcast the full configuration to peer nodes
 void share_config() {
   pbuf* alivePkt = pbuf_alloc(PBUF_TRANSPORT, ALIVE_PKT_LEN, PBUF_RAM);
   uint8_t * pktptr = (uint8_t*)(alivePkt->payload);
-  uint16_t wlen = snprintf((char*)pktptr, ALIVE_PKT_LEN, "cp%xb%xc%cs%cd%xt%04x",
+  uint16_t wlen = snprintf((char*)pktptr, ALIVE_PKT_LEN, "cp%xb%xc%cs%cd%ct%04x",
       type, bri, as_exthex(col), as_exthex(del), as_exthex(dens), now);
   switch (type) {
     case 0: // sparks
@@ -438,6 +438,8 @@ void handleBinary(uint8_t *rt, uint16_t len) {
     strip_config();
   }
   if (len > led_cnt) len = led_cnt;
+  // the map defines for which pin the data shall go
+  // it is a set of 4 hex nibbles
   while (map) {
     if (map & cmd & 0x0f) memcpy (pix, rt, len);
     pix += led_cnt;
@@ -449,7 +451,8 @@ void handleBinary(uint8_t *rt, uint16_t len) {
   }
 }
 
-// directly process the pbuf we got from udp_recv callback
+// process the pbuf we got from udp_recv callback
+// the pbuf is returned in the callback
 void handleUDP(pbuf *pb) {
   uint8_t * recPkt = (uint8_t*)(pb->payload);
   switch (recPkt[0]) {
@@ -721,8 +724,8 @@ void loop() {
     paramsel(re_selector);
     re_click = 0;
   }
-  // check wifi
-  if (WiFi.status() == WL_CONNECTED || wifimode==WIFI_LEAD) handleIP();  // STA connected?
+  // check TCP; UDP are processed when arrived
+  if (WiFi.status() == WL_CONNECTED || wifimode==WIFI_LEAD) handleIP();
   // disable interrupt while we check rotary encoder values
   noInterrupts();
   if (re_flag || wifi_param) {
@@ -734,28 +737,28 @@ void loop() {
   re_flag = 0; // clear flag
   interrupts();
   // #### re_param = which parameter was changed ####
-  if (re_param & 0x10 && wifimode == WIFI_LEAD) share_config();
-  if (re_param == 0x10 || wifi_param & 0x01) {   // new program type
+  if (re_param == 0x10 || wifi_param & 0x001) {   // new program type
     if (type != 255) conf.type = type;
     proginit(!wifi_param); // don't load parameters if from wifi
   }
+  if (re_param & 0x10 && wifimode == WIFI_LEAD) share_config();
   if (re_param == 0x23 || wifi_param & 0x100) { // wifi mode
     conf.wifi = wifimode;
     paramcol();
     wifi_config(wifimode);
   }
-  if ((re_param & 0xf0) == 0x20 || wifi_param & 0x80) { // configure strip, see handleCommand
+  if (re_param || wifi_param & 0x002) { // any other parameter
+    // just in case update brightness, all other parameter are handled in their effect context
+    if (type < NPROG) conf.bri[type] = bri;
+    strip.setBrightness(convertBrightness());
+  }
+  if ((re_param & 0xf0) == 0x20 || wifi_param & 0x080) { // configure strip, see handleCommand
     conf.slen = slen;
     conf.srgb = srgb;
     conf.split = split;
     paramcol();
     strip_config();
     proginit(1);
-  }
-  if (re_param || wifi_param & 0x02) { // any other parameter
-    // just in case update brightness, all other parameter are handled in their effect context
-    if (type < NPROG) conf.bri[type] = bri;
-    strip.setBrightness(convertBrightness());
   }
 // #### LED strip calculations except when type = 255, udp to pixel ####
   if (type != 255) {
@@ -925,8 +928,27 @@ void Stars_Init(void)
 void Stars(void)
 {
   uint16_t i;
+  uint8_t init = 0;
 
-  for (i=0; i<dcnt; i++)
+  // parameter update
+  if (re_param == 0x11 || wifi_param & 0x004) { // color wheel
+    if (col > 17) col = 17;
+    Stars_DispCol(col);
+    conf.scol = col;
+  }
+  if (re_param == 0x12 || wifi_param & 0x008) { // acceleration
+    if (del > 8) del = 8;
+    conf.sacc = del;
+  }
+  if (re_param == 0x13 || wifi_param & 0x010) { // density
+    if (dens > 15) dens = 15;
+    conf.density = dens;
+    // with new program type, _Init() is already done
+    if (! wifi_param & 0x001) Stars_Init();
+    init = 1;
+  }
+  // update all stars
+  if (!init) for (i=0; i<dcnt; i++)
   {
     uint16_t p = sparks.pos[i];
     uint16_t d = now - sparks.t0[i];
@@ -944,21 +966,6 @@ void Stars(void)
     strip.setPixelColor(p, hsv);
   }
   sparks.hue += 16; // slowly walk the color wheel, 136 seconds the round
-  // parameter update
-  if (re_param == 0x11 || wifi_param & 0x04) { // color wheel
-    if (col > 17) col = 17;
-    Stars_DispCol(col);
-    conf.scol = col;
-  }
-  if (re_param == 0x12 || wifi_param & 0x08) { // acceleration
-    if (del > 8) del = 8;
-    conf.sacc = del;
-  }
-  if (re_param == 0x13 || wifi_param & 0x10) { // density
-    if (dens > 15) dens = 15;
-    conf.density = dens;
-    Stars_Init();
-  }
 }
 
 uint16_t getNewPos()
@@ -1175,26 +1182,26 @@ void Duco_Init()
   colors.ts = now - colors.del;
   colors.off = 0;
   Duco_Select(col);
-  if (wifi_param & 0x040) {
-    colors.ts = colors_ts;
-    colors.off = colors_off;
-  }
 }
 
 void Duco()
 {
   uint16_t v, i, c = colors.off;
   // update parameters
-  if (re_param == 0x11 || wifi_param & 0x04) { // color selection
+  if (wifi_param & 0x040) { // timestamp
+    colors.ts = colors_ts;
+    colors.off = colors_off;
+  }
+  if (re_param == 0x11 || wifi_param & 0x004) { // color selection
     if (col > DUCO_MAX) col = DUCO_MAX;
     conf.ccs = col;
     Duco_Select(col);
   }
-  if (re_param == 0x12 || wifi_param & 0x08) { // speed, 0=stop, 1..16
+  if (re_param == 0x12 || wifi_param & 0x008) { // speed, 0=stop, 1..16
     if (del > 16) del = 16;
     colors.del = Duco_Delay();
   }
-  if (re_param == 0x13 || wifi_param & 0x10) { // speed variation
+  if (re_param == 0x13 || wifi_param & 0x010) { // speed variation
     if (dens > 5) dens = 5;
     conf.cdens = dens;
     colors.gts = now;
@@ -1270,12 +1277,12 @@ void Rainbow()
   uint16_t i, v, c = rainbow.off;
 
   // update parameters
-  if (re_param == 0x11 || wifi_param & 0x08) { // speed, 0=stop, 1..16
+  if (re_param == 0x11 || wifi_param & 0x008) { // speed, 0=stop, 1..16
     if (del > 16) del = 16;
     rainbow.stsz = Rainbow_Step();
     conf.rbspeed = del;
   }
-  if (re_param == 0x12 || wifi_param & 0x10) { // color spread factor
+  if (re_param == 0x12 || wifi_param & 0x010) { // color spread factor
     if (dens > 31) dens = 31;
     conf.rbspread = dens;
   }
@@ -1355,13 +1362,13 @@ void Sprites(void)
   uint8_t coll=0; // 1 when a sprite is in the start ramp
 
   // update parameters
-  if (re_param == 0x11 || wifi_param & 0x10) { // density
+  if (re_param == 0x11 || wifi_param & 0x010) { // density
     if (dens > 15) dens = 15;
     conf.stype = dens;
     actdens = sprites_density(dens);
   }
   ramp=500*actdens;
-  if (re_param == 0x12 || wifi_param & 0x08) { // acceleration
+  if (re_param == 0x12 || wifi_param & 0x008) { // acceleration
     if (del > 15) del = 15;
     conf.speed = del;
     sprites.s1 = sprites_speed(del);
@@ -1446,16 +1453,16 @@ void Fire(void)
   uint16_t i;
 
   // update parameters
-  if (re_param == 0x11 || wifi_param & 0x04) { // cooling
+  if (re_param == 0x11 || wifi_param & 0x004) { // cooling
     if (col > 15) col = 15;
     conf.cooling = col;
   }
-  if (re_param == 0x12 || wifi_param & 0x08) { // flicker speed
+  if (re_param == 0x12 || wifi_param & 0x008) { // flicker speed
     if (del > 15) del = 15;
     conf.flicker = del;
     fire.del = Fire_Delay();
   }
-  if (re_param == 0x13 || wifi_param & 0x10) { // density
+  if (re_param == 0x13 || wifi_param & 0x010) { // density
     if (dens > 15) dens = 15;
     conf.sparks = dens;
   }
@@ -1527,16 +1534,16 @@ void Lava(void)
   uint16_t i, cnt = led_cnt / 4;
 
   // update parameters
-  if (re_param == 0x11 || wifi_param & 0x04) { // cooling
+  if (re_param == 0x11 || wifi_param & 0x004) { // cooling
     if (col > 15) col = 15;
     conf.lavacool = col;
   }
-  if (re_param == 0x12 || wifi_param & 0x08) { // lavaspeed
+  if (re_param == 0x12 || wifi_param & 0x008) { // lavaspeed
     if (del > 15) del = 15;
     conf.lavaspeed = del;
     lava.del = Fire_Delay();
   }
-  if (re_param == 0x13 || wifi_param & 0x10) { // heat
+  if (re_param == 0x13 || wifi_param & 0x010) { // heat
     if (dens > 15) dens = 15;
     conf.heat = dens;
   }
