@@ -20,6 +20,10 @@ One issue that arises is to map from linear input values to exponential output v
 
 https://github.com/klausbotschen/esp8266-led/blob/main/doc/log-curve-fitting.ods
 
+To update the firmware: esptool --port /dev/ttyUSB0 --baud 921600 write_flash --flash_mode dio --flash_size detect 0x00000 boot_v1.7.bin 0x01000 user1.1024.new.2-2022.bin 0x7c000 ../fw/esp_init_data_default_v08-good.bin 0xfC000 esp_init_data_default_v08.bin 0x7E000 blank.bin 0xfE000 blank.bin
+
+https://github.com/espressif/ESP8266_NONOS_SDK/tree/master?tab=readme-ov-file
+
 ## Hardware
 
 * AZDelivery ESP8266-12F D1-mini
@@ -37,14 +41,15 @@ The sketch provides a set of LED effects with their parameters, it handles the r
 
 ### Effects
 
-Following effects can be selected using the rotary wheel, where the color shown
+Following effects can be selected using the rotary wheel:
 
-* Sparkling stars:
+* Sparkling stars
 * Candle light chain
 * Color Flip
 * Sprites: Moving dots, instantiate in one end, and vanish at the other
 * Fire
 * Lava
+* Rainbow
 
 ## User Interface
 
@@ -63,8 +68,8 @@ Status LED color depicts which parameter is currently affected by the rotary enc
 * white: effect
 * red: brightness
 * green: speed
-* blue: density (dampening for fire/lava)
-* violet: heat (lava), spark area size (fire), color (stars, duco)
+* blue: density, dampening (for fire/lava), morphing speed (color flip)
+* violet: heat (lava), spark area size (fire), color (stars, color flip)
 
 For "sparkling stars", violet allows to select the color range. To visualize the current selection, the current color is shown for 2/3 seconds, and violet is shown for 1/3 second. For the color range, following choices are available:
 
@@ -72,12 +77,7 @@ For "sparkling stars", violet allows to select the color range. To visualize the
 * 15 colors out of the color wheel: The selected color is used as center, and colors are selected from a narrow range around this color.
 * dark grey: the center color is gradually walking through the color wheel in 136 seconds.
 
-For "Color Fliw", violet provides currently 4 color selections:
-
-* 1: blue-yellow-red-green
-* 2: two levels of magenta/violett
-* 3: a continous color morphing between 1 and 2
-* 4: toggle between red, blue <=> yellow, green
+For "Color Flip", the violet parameter provides currently 10 color selections, where 4 of them perform an additional color morphing between two end states. The morphing is performed even when the speed parameter is set to zero and no actual color flip is done.
 
 In level 2, the parameters concern the strip/string configuration, here, the parameter value is shown in discrete colors (1/3 parameter, 2/3 value):
 
@@ -87,6 +87,12 @@ In level 2, the parameters concern the strip/string configuration, here, the par
   * red: no split, the full length of the array is written to all 4 channels in parallel.
   * green: 2-split, the first half of the array is written to pins A and C, the seconed half is reversed in order and written to pins B and D, in effect A+B are one long strip and identical to C+D. The effect is streched out to two segments.
   * blue: 4-split, the array is cut in 4, and each segment is written to one pin, therefore each channel is fully separated.
+* red: WiFi mode,
+  * red: off
+  * yellow: klaus iphone
+  * turquise: leo
+  * blue: follow (connect to hotspot)
+  * violet: lead (start hotspot)
 
 ### LED output control
 
