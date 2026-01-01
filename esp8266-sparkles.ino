@@ -38,6 +38,7 @@
 
 // D8 = GPIO15
 Adafruit_NeoPixel state = Adafruit_NeoPixel (1, D8, NEO_GRBW);
+// color values are in RGB
 #define STAT_RED 0x00ff0000
 #define STAT_VIOLET 0x00ff00ff
 #define STAT_DIM_VIOLET 0x007f007f
@@ -45,6 +46,7 @@ Adafruit_NeoPixel state = Adafruit_NeoPixel (1, D8, NEO_GRBW);
 #define STAT_GREEN 0x0000ff00
 #define STAT_BLUE 0x000000ff
 #define STAT_DIM_WHITE 0x003f3f3f
+#define STAT_CYAN 0x0000ffff
 
 // NEO_NOSPLIT: the full length is written to all 4 pins, which means the strips have identical data.
 // NEO_SPLIT2: the first half of the array is written to pins 1 and 3, the seconed half is reversed in order
@@ -52,16 +54,7 @@ Adafruit_NeoPixel state = Adafruit_NeoPixel (1, D8, NEO_GRBW);
 // NEO_SPLIT4: the array is cut into 4 segments, and each segment is written to one pin.
 // D3 => 16, D2 => 4, D1 => 5, D7 => 13
 Adafruit_NeoPixel strip = Adafruit_NeoPixel (LED_CNT, D3, D2, D1, D7, LED_PIXT+NEO_NOSPLIT);
-// note, _D3_ = GPIO0 is affected by debug output from:
-// Arduino/Arduino/cores/esp8266/IPAddress.cpp
-// Arduino/Arduino/cores/esp8266/Print.cpp
-// Arduino/Arduino/cores/esp8266/debug.h
-// Arduino/Arduino/libraries/ESP8266HTTPClient/src/ESP8266HTTPClient.h
-// Arduino/Arduino/libraries/ESP8266WebServer/src/ESP8266WebServer.h
-// Arduino/Arduino/libraries/ESP8266WiFi/src/ESP8266WiFi.cpp
-// Arduino/Arduino/libraries/ESP8266WiFi/src/ESP8266WiFi.h
-// Arduino/Arduino/libraries/ESP8266WiFi/src/ESP8266WiFiGeneric.h
-// Arduino/Arduino/libraries/ESP8266WiFi/src/WiFiUdp.cpp
+// note, _D3_ = GPIO0 is affected by some weird artifact.
 
 void Stars_Init(void);
 void Stars_Load(void);
@@ -98,12 +91,16 @@ void Lava_Load(void);
 uint8_t Lava_Param(void);
 void Lava(void);
 
+void Test_Init(void);
+uint8_t Test_Param(void);
+uint16_t Test(void);
+
 void loadParam(void);
 
 // ######################################################################
 
 // number of effects
-#define NPROG 7
+#define NPROG 8
 
 // this datastructure is stored in the EEPROM
 // and holds all necessary config entries for all effects.
@@ -292,7 +289,6 @@ void wifi_config(uint8_t wm) {
     // ssid, psk, channel, hidden, max_connection
     WiFi.softAP("katzenwildbahn", "buskatze", 1, false, 8);
     WiFi.softAPConfig(local_IP, gateway, subnet);
-    // bcast = WiFi.softAPbroadcastIP();
     break;
   }
   if (wm == WIFI_LEAD) act_bcast = bcast;
@@ -363,8 +359,8 @@ void handleCommand(uint8_t *rt, uint16_t len) {
       }
     }
   }
-  if (wifi_param & 0x040) { // timestamp
-    ts_diff = ts_rec - now;
+  if (wifi_param & 0x040) { // timestamp received => calculate most probable time
+    ts_diff = ts_rec - now + 10;
     tsa[tscnt++] = (ts_rec - ts_prev) - (now - ts_hist);
     ts_prev = ts_rec;
     if (tscnt >= 8) {
@@ -630,6 +626,7 @@ void paramsel(uint8_t p) {
       case 4: re_selector = Fire_Param(); break;
       case 5: re_selector = Lava_Param(); break;
       case 6: re_selector = Rainbow_Param(); break;
+      case 7: re_selector = Test_Param(); break;
     }
     if (re_selector == 0) { // no parameter => select prog type
       stateCol = STAT_DIM_WHITE; // dim wite
@@ -669,6 +666,7 @@ void loadParam()
     case 4: Fire_Load(); break;
     case 5: Lava_Load(); break;
     case 6: Rainbow_Load(); break;
+    case 7: break;
   }
 }
 
@@ -683,6 +681,7 @@ void proginit(uint8_t load)
     case 4: Fire_Init(); break;
     case 5: Lava_Init(); break;
     case 6: Rainbow_Init(); break;
+    case 7: Test_Init(); break;
   }
 }
 
@@ -741,14 +740,13 @@ void loop() {
     if (type != 255) conf.type = type;
     proginit(!wifi_param); // don't load parameters if from wifi
   }
-  if (re_param & 0x10 && wifimode == WIFI_LEAD) share_config();
   if (re_param == 0x23 || wifi_param & 0x100) { // wifi mode
     conf.wifi = wifimode;
     paramcol();
     wifi_config(wifimode);
   }
   if (re_param || wifi_param & 0x002) { // any other parameter
-    // just in case update brightness, all other parameter are handled in their effect context
+    // store brightness, all other parameter are handled in their effect context
     if (type < NPROG) conf.bri[type] = bri;
     strip.setBrightness(convertBrightness());
   }
@@ -763,6 +761,7 @@ void loop() {
 // #### LED strip calculations except when type = 255, udp to pixel ####
   if (type != 255) {
     // finally we actually run our effect programs:
+    d = 1;
     switch (type) {
       case 0: Stars(); break;
       case 1: Candles(); break;
@@ -771,9 +770,12 @@ void loop() {
       case 4: Fire(); break;
       case 5: Lava(); break;
       case 6: Rainbow(); break;
+      case 7: d = Test(); break;
     }
-    strip.show();
+    if (d) strip.show(); // takes ~6 ms
   }
+  // share parameters after effect processing as some time values are updated there
+  if (re_param & 0x10 && wifimode == WIFI_LEAD) share_config();
   wifi_param = 0; // WiFi params processed
   re_param = 0;
   // user interface: blink status LED when has been changed and is written to EEPROM
@@ -920,9 +922,6 @@ void Stars_Init(void)
     }
   }
   strip.clear();
-  if (wifi_param & 0x040) {
-    sparks.hue = sparks_hue;
-  }
 }
 
 void Stars(void)
@@ -931,6 +930,9 @@ void Stars(void)
   uint8_t init = 0;
 
   // parameter update
+  if (wifi_param & 0x040) {
+    sparks.hue = sparks_hue; // color wheel walk, just take over value from leading node
+  }
   if (re_param == 0x11 || wifi_param & 0x004) { // color wheel
     if (col > 17) col = 17;
     Stars_DispCol(col);
@@ -1090,7 +1092,6 @@ uint8_t Candle_Param() {
 // del: 0 = stop, 1..16 => 16..1
 // 1 ... 16 => 10 ... 1500
 uint16_t Duco_Delay(void) {
-  conf.cdel = del;
   float td = 7.155 * exp (0.334 * (17-del));
   return td;
 }
@@ -1163,8 +1164,15 @@ void Duco_Select(uint8_t i) {
             colors.walk = 1;
             break;
   }
-  // when time sync received, use colors_gts
-  colors.gts = (wifi_param & 0x040) ? colors_gts : now;
+  if (wifi_param & 0x040) { // sync only when the new type is set
+    colors.gts = colors_gts;
+    colors.ts = colors_ts;
+    colors.off = colors_off;
+  } else {
+    colors.gts = now;
+    colors.ts = now;
+    colors.off = 0;   
+  }
 }
 
 void Duco_Load()
@@ -1179,43 +1187,41 @@ void Duco_Init()
 {
   Duco_Load();
   colors.del = Duco_Delay();
-  colors.ts = now - colors.del;
+  colors.ts = now - colors.del; // when the next shift is due
+  colors.gts = now;
   colors.off = 0;
   Duco_Select(col);
 }
 
 void Duco()
 {
-  uint16_t v, i, c = colors.off;
+  uint16_t v=0, i, c = colors.off, tnow = now + ts_diff;
   // update parameters
-  if (wifi_param & 0x040) { // timestamp
-    colors.ts = colors_ts;
-    colors.off = colors_off;
-  }
   if (re_param == 0x11 || wifi_param & 0x004) { // color selection
     if (col > DUCO_MAX) col = DUCO_MAX;
     conf.ccs = col;
-    Duco_Select(col);
+    v = 1; // reload color settings
   }
   if (re_param == 0x12 || wifi_param & 0x008) { // speed, 0=stop, 1..16
     if (del > 16) del = 16;
+    conf.cdel = del;
     colors.del = Duco_Delay();
   }
   if (re_param == 0x13 || wifi_param & 0x010) { // speed variation
     if (dens > 5) dens = 5;
     conf.cdens = dens;
-    colors.gts = now;
     Duco_DensSet();
-    Duco_Select(col);
+    v = 1; // reload color settings
   }
+  if (v) Duco_Select(col);
   // calculate the position on the gradient depending on time and speed
-  uint16_t gd = now + ts_diff - colors.gts, gul = colors.speed*2;
+  uint16_t gd = tnow - colors.gts, gul = colors.speed*2;
   if (gd >= gul) colors.gts += gul, gd -= gul; // reached limit, new circle
   else if (gd > colors.speed) gd = gul - gd; // in the second half we walk back
 
-  uint16_t d = now + ts_diff - colors.ts;
+  uint16_t d = tnow - colors.ts;
   if (del && d >= colors.del) {   // update was triggered timeout
-    colors.ts = now + ts_diff;
+    colors.ts = tnow;
     colors.off++; // advance offset
     if (colors.off == MAX_COL) colors.off = 0;
   }
@@ -1599,32 +1605,36 @@ uint8_t Lava_Param() {
 // ######################################################################
 // was only written to distinguish between RGB and RBG chips
 
-// void Test_Init(void)
-// {
-// }
+void Test_Init(void)
+{
+  col = 0;
+  if (bri > 8) bri = 8;
+}
 
-// void Test(void)
-// {
-//   uint16_t i;
-//   uint32_t hsv;
-//   for (i=0; i<led_cnt; i++) {
-//     switch (col) {
-//       case 0: hsv = STAT_BLUE; break;
-//       case 1: hsv = STAT_GREEN; break;
-//       case 2: hsv = STAT_RED; break;
-//       case 3: hsv = 0x00ffffff; break;
-//     }
-//     strip.setPixelColor(i, hsv);
-//   }
-// }
+uint16_t Test(void)
+{
+  uint16_t i;
+  uint32_t hsv;
+  for (i=0; i<led_cnt; i++) {
+    switch (col) {
+      case 0: hsv = STAT_BLUE; break;
+      case 1: hsv = STAT_GREEN; break;
+      case 2: hsv = STAT_RED; break;
+      case 3: hsv = 0x00ffffff; break;
+      case 4: hsv = 0x00000000; break;
+    }
+    strip.setPixelColor(i, hsv); // RGB
+  }
+  return re_param; // update at parameter change
+}
 
-// uint8_t Test_Param() {
-//   switch (re_selector) {
-//       case 1: re_val_ptr = &col; re_max = 3; stateCol = STAT_BLUE; break;
-//       case 2: re_val_ptr = &bri; re_max = 15; stateCol = STAT_RED; break;
-//       default: return 0;
-//   }
-//   return re_selector;
-// }
+uint8_t Test_Param() {
+  switch (re_selector) {
+      case 1: re_val_ptr = &col; re_max = 4; stateCol = STAT_BLUE; break;
+      case 2: re_val_ptr = &bri; re_max = 8; stateCol = STAT_RED; break;
+      default: return 0;
+  }
+  return re_selector;
+}
 
 // ######################################################################
